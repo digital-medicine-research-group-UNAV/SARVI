@@ -31,7 +31,7 @@ from ..services.async_funcs import (
 def initialize_variables(ctx: PipelineContext):
     create_intermediate_folder_name(ctx)
 
-    report_list = natsorted(ctx.paths.data_input.iterdir())
+    report_list = natsorted(p for p in (ctx.paths.data_input / ctx.folder_and_archive_name).iterdir() if p.is_file())
     prompt = textwrap.dedent(prompts_total["report_to_data"])
     llm = load_llm(ctx.llm_config)
     semaforo = asyncio.Semaphore(ctx.MAX_CONCURRENCY)
