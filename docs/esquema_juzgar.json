@@ -1,0 +1,12 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Esquema Resultado",
+    "type": "object",
+    "properties": {
+        "resultado": {
+            "type": "boolean"
+        }
+    },
+    "required": ["resultado"],
+    "additionalProperties": false
+}
