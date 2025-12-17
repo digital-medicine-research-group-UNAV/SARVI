@@ -67,7 +67,7 @@ def initialize_variables(ctx: PipelineContext):
 
     llm = load_llm(ctx.llm_config)
     semaforo = asyncio.Semaphore(ctx.MAX_CONCURRENCY)
-    docx_lista = cargar_docx_lista(ctx.paths.data_input)
+    docx_lista = cargar_docx_lista(ctx.paths.data_input / ctx.folder_and_archive_name)
 
     #################################################################################################################
 

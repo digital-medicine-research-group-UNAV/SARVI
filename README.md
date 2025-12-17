@@ -45,6 +45,8 @@ python -m src.MrDoc.main --tarea docx_to_jsons --modo sync --llm_service ollama 
 
 ## Order to execute
 
+0. All the `.docx` files to work with, must be in the directory `data/input/{folder_and_archive_name}`. Important to keep the same *folder_and_archive_name* through all the execution
+
 1. `docx_to_jsons`
 
 2. `jsons_to_xlsx`
