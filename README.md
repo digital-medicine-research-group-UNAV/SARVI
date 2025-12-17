@@ -41,7 +41,7 @@ python -m src.MrDoc.main --tarea docx_to_jsons --modo sync --llm_service ollama 
 
 7. `paths`
 
-> 6. and 7. are only necessary when executing in command style
+> 6. and 7. are only necessary when executing in package style
 
 ## Order to execute
 
