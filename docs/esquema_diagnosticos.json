@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Esquema Diagnosticos",
+  "type": "object",
+  "properties": {
+    "diagnosticos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "diagnostico_extraido": { "type": "string" },
+          "codigo_CIE10":        { "type": "string" },
+          "fecha_alta":          { "type": ["string", "null"] },
+          "fecha_baja":          { "type": ["string", "null"] },
+          "pertenencia":         { "type": "string" }
+        },
+        "required": [
+          "diagnostico_extraido",
+          "codigo_CIE10",
+          "fecha_alta",
+          "fecha_baja",
+          "pertenencia"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    }
+  },
+  "required": ["diagnosticos"],
+  "additionalProperties": false
+}

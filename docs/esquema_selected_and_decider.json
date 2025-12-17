@@ -1,0 +1,12 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Esquema CIE10",
+    "type": "object",
+    "properties": {
+        "CIE10": {
+            "type": "string"
+        }
+    },
+    "required": ["CIE10"],
+    "additionalProperties": false
+}
