@@ -6,11 +6,11 @@ __pycache__
 *.pt
 *.venv
 
-/data/input/
+/data/input/*
 !/data/input/.gitkeep
-/data/intermediate/
+/data/intermediate/*
 !/data/intermediate/.gitkeep
-/data/output/
+/data/output/*
 !/data/output/.gitkeep
 
 /logs/
