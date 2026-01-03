@@ -1,3 +1,4 @@
+import os
 import torch
 import ollama
 import asyncio
@@ -211,6 +212,7 @@ def load_llm_vllm_local_framework(cfg):
         `llm`: LLMvLLMWrapper
             - Wrapper que permite ejecutar inferencias directamente con llm.invoke()
     """
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     llm = LLM(model=cfg.model, gpu_memory_utilization=0.4,
         enable_prefix_caching=True,
