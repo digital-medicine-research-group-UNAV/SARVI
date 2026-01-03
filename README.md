@@ -59,6 +59,6 @@ python -m src.MrDoc.main --tarea docx_to_jsons --modo sync --llm_service ollama 
 - **SYNC** -> Local LLMs
     - MedGemma *(Transformers)* - `google/medgemma-4b-it`
     - GPT-oss *(Ollama)* - `gpt-oss:20b`
-    - GPT-oss *(vLLM)* - `gpt-oss:20b`
+    - GPT-oss *(vLLM)* - `openai/gpt-oss-20b`
 
 > Other models or exchanges between ASYNC and SYNC are NOT TESTED
