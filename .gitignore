@@ -16,4 +16,6 @@ __pycache__
 /logs/*
 !/logs/.gitkeep
 
+/notebooks/CodiEsp
+
 /src/MrDoc.egg-info
