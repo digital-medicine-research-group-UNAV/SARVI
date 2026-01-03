@@ -29,6 +29,14 @@ class LoggerTee:
         self.terminal.flush()
         self.log.flush()
 
+    def fileno(self):
+        # Requerido para servicios como vLLM
+        return self.terminal.fileno()
+    
+    def isatty(self):
+        # Requerido para servicios como vLLM
+        return self.terminal.isatty()
+
     def close(self):
         self.log.close()
 
