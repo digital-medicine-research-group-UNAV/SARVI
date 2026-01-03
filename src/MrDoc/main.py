@@ -1,13 +1,23 @@
 import os
+import gc
 import signal
 import torch
 import asyncio
 import argparse
+import contextlib
 from .models import LLMConfig, PipelineContext
 from .config import paths
 from .logging_redirect import enable_stdout_logging
 from .core.create_jsons_per_llm_model import run_docx_to_jsons_sync, run_docx_to_jsons_async
 from .core.complete_excel_per_llm_model import run_jsons_to_xlsx_sync, run_jsons_to_xlsx_async
+
+def terminate_process() -> None:
+    with contextlib.suppress(Exception):
+        torch.distributed.destroy_process_group()
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def run(ctx: PipelineContext, tarea: str, modo: str, folder_and_archive_name: str) -> None:
@@ -29,7 +39,7 @@ def run(ctx: PipelineContext, tarea: str, modo: str, folder_and_archive_name: st
             asyncio.run(run_jsons_to_xlsx_async(ctx))
 
     print("Ejecución finalizada.")
-    os.kill(os.getpid(), signal.SIGTERM)
+    terminate_process()    
 
 
 def main() -> None:
