@@ -1,3 +1,5 @@
+import os
+import signal
 import torch
 import asyncio
 import argparse
@@ -27,6 +29,7 @@ def run(ctx: PipelineContext, tarea: str, modo: str, folder_and_archive_name: st
             asyncio.run(run_jsons_to_xlsx_async(ctx))
 
     print("Ejecución finalizada.")
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def main() -> None:
