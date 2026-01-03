@@ -23,6 +23,8 @@ def terminate_process() -> None:
 
 
 def run(ctx: PipelineContext, tarea: str, modo: str, folder_and_archive_name: str) -> None:
+    signal.signal(signal.SIGINT, terminate_process)
+
     log_file = ctx.paths.logs_dir / f"{tarea}_{modo.upper()}_{folder_and_archive_name}.log"
     enable_stdout_logging(log_file)
 
