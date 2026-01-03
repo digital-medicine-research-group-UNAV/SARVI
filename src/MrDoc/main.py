@@ -56,7 +56,7 @@ def main() -> None:
         "--llm_service",
         type=str,
         required=True,
-        choices=["openai", "ollama", "transformers"],
+        choices=["openai", "ollama", "transformers", "vllm"],
         help="Servicio desde el cual inicializar y ejecutar el LLM"
     )
 
