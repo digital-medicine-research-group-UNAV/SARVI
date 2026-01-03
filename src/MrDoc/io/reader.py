@@ -64,6 +64,26 @@ def read_excel(ctx: PipelineContext, xlsx_name: str, **kwargs: object):
     return pd.read_excel(ctx.paths.docs_dir / xlsx_name, **kwargs)
 
 
+def read_json_single(path: Path) -> dict:
+    """
+    Read the a single `.json` and returns a dict with that data
+
+    Parameters
+    ----------
+        `path`: Path
+            - JSON path
+
+    Returns
+    -------
+        `data`: dict
+            - The `.json` data
+    """
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return data
+
+
 def read_json_diagnosticos(folders: list[Path]) -> dict[str, dict]:
     """
     Read the data from the multiple `.json` and returns a flatten list with all of them
@@ -85,8 +105,7 @@ def read_json_diagnosticos(folders: list[Path]) -> dict[str, dict]:
     for folder in folders:
         json_list = [f for f in folder.glob("*.json") if f.is_file()]
         for jsonfile in tqdm(json_list, desc="Procesando JSONs...", unit="JSON", total=len(json_list)):
-            with jsonfile.open('r') as f:
-                data[jsonfile.stem] = json.load(f)
+            data[jsonfile.stem] = read_json_single(jsonfile)
     
     return data
 

@@ -9,7 +9,7 @@ from vllm import LLM, SamplingParams
 from vllm.sampling_params import StructuredOutputsParams
 
 from ..models import LLMConfig
-
+from ..io.reader import read_json_single
 
 #################################################################################################################
 class LLMTransformersWrapper:
@@ -88,8 +88,7 @@ class LLMvLLMWrapper:
             add_generation_prompt=True
         )
 
-        with kwargs.get("json_schema").open("r", encoding="utf-8") as f:
-            json_schema_llm_response = json.load(f)
+        json_schema_llm_response = read_json_single(kwargs.get("json_schema"))
 
         sampling_params = SamplingParams(temperature=0, structured_outputs=StructuredOutputsParams(json=json_schema_llm_response))
         outputs  = self.llm.generate(prompt_text, sampling_params)
