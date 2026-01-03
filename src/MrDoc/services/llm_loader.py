@@ -91,7 +91,7 @@ class LLMvLLMWrapper:
         outputs  = self.llm.generate(prompt_text, sampling_params)
         return outputs[0].outputs[0].text
     
-    async def ainvoke(self, messages: list, stream: bool = False):
+    async def ainvoke(self, messages: list, stream: bool = False, **kwargs):
         return await asyncio.to_thread(self.invoke, messages, stream)
 
 #################################################################################################################
