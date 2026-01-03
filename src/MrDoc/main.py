@@ -1,5 +1,6 @@
 import os
 import gc
+import time
 import signal
 import torch
 import asyncio
@@ -17,6 +18,7 @@ def terminate_process() -> None:
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
+    time.sleep(2)
     os.kill(os.getpid(), signal.SIGTERM)
 
 
