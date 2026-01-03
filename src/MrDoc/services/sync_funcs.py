@@ -64,7 +64,7 @@ def procesar_informe(informe_raw: str, prompt: str, llm, docs_dir: Path, json_pa
         messages = [SystemMessage(content=prompt),
                     HumanMessage(content=informe_raw)]
 
-    answer = llm.invoke(messages)
+    answer = llm.invoke(messages, json_schema=docs_dir / "esquema_diagnosticos.json")
 
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)
@@ -128,7 +128,7 @@ def seleccionar_CIE10_lista(enfermedad: str, CIE10_dict: dict, prompt: str, llm,
                                             ```
                                         """)]
 
-    answer = llm.invoke(messages)
+    answer = llm.invoke(messages, json_schema=docs_dir / "esquema_selected_and_decider.json")
     
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)
@@ -200,7 +200,7 @@ def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_extraid
                                             ```
                                         """)]
 
-    answer = llm.invoke(messages)
+    answer = llm.invoke(messages, json_schema=docs_dir / "esquema_juzgar.json")
     
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)
@@ -263,7 +263,7 @@ def decidir_CIE10(diagnostico_extraido: str, contexto: str, prompt: str, llm, do
                                             ```
                                         """)]
 
-    answer = llm.invoke(messages)
+    answer = llm.invoke(messages, json_schema=docs_dir / "esquema_selected_and_decider.json")
     
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)

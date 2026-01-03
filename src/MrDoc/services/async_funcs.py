@@ -75,7 +75,7 @@ async def procesar_informe(informe_raw: str, prompt: str, llm, docs_dir: Path, j
     messages = [SystemMessage(content=prompt),
                 HumanMessage(content=informe_raw)]
 
-    answer = await llm.ainvoke(messages)
+    answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_diagnosticos.json")
     answer = answer.content
 
     if json_parse:
@@ -129,7 +129,7 @@ async def seleccionar_CIE10_lista(enfermedad: str, CIE10_dict: dict, prompt: str
                                     ```
                                     """)]
 
-    answer = await llm.ainvoke(messages)
+    answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_selected_and_decider.json")
     answer = answer.content
 
     if json_parse:
@@ -187,7 +187,7 @@ async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_e
                                     ```
                                     """)]
 
-    answer = await llm.ainvoke(messages)
+    answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_juzgar.json")
     answer = answer.content
 
     if json_parse:
@@ -239,7 +239,7 @@ async def decidir_CIE10(diagnostico_extraido: str, contexto: str, prompt: str, l
                                     ```
                                     """)]
 
-    answer = await llm.ainvoke(messages)
+    answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_selected_and_decider.json")
     answer = answer.content
     
     if json_parse:
