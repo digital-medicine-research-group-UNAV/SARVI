@@ -3,6 +3,8 @@ import ollama
 import asyncio
 from langchain_openai import ChatOpenAI
 from transformers import AutoTokenizer, AutoModelForImageTextToText, AutoImageProcessor
+from vllm import LLM, SamplingParams
+from vllm.sampling_params import StructuredOutputsParams
 
 from ..models import LLMConfig
 
@@ -15,7 +17,7 @@ class LLMTransformersWrapper:
         self.img_proc = img_proc
         self.device = device
 
-    def invoke(self, messages, max_new_tokens=8192, do_sample=False, temperature=0.0):
+    def invoke(self, messages, max_new_tokens=8192, do_sample=False, temperature=0.0, **kwargs):
         messages_dict = [
             {"role": "system", "content": [{"type": "text", "text": messages[0]}]},
             {"role": "user",   "content": [{"type": "text", "text": messages[1]}]},
@@ -43,7 +45,7 @@ class LLMTransformersWrapper:
         return self.tok.decode(outputs[0], skip_special_tokens=True)
     
 
-    async def ainvoke(self, messages, max_new_tokens=8192, do_sample=False, temperature=0.0):
+    async def ainvoke(self, messages, max_new_tokens=8192, do_sample=False, temperature=0.0, **kwargs):
         return await asyncio.to_thread(self.invoke, messages, max_new_tokens, do_sample, temperature)
 
 
@@ -52,7 +54,7 @@ class LLMOllamaWrapper:
         self.model = model
         ollama.pull(model)
 
-    def invoke(self, messages: list, stream: bool = False):
+    def invoke(self, messages: list, stream: bool = False, **kwargs):
         """
         Ejecuta una generación con ollama.generate, combinando los prompts.
         """
@@ -64,6 +66,30 @@ class LLMOllamaWrapper:
         )
         return response["response"]
     
+    async def ainvoke(self, messages: list, stream: bool = False, **kwargs):
+        return await asyncio.to_thread(self.invoke, messages, stream)
+    
+
+class LLMvLLMWrapper:
+    def __init__(self, llm):
+        self.llm = llm
+
+    def invoke(self, messages: list, **kwargs):
+        messages_dict = [
+            {"role": "system", "content": [{"type": "text", "text": messages[0]}]},
+            {"role": "user",   "content": [{"type": "text", "text": messages[1]}]},
+        ]
+
+        prompt_text = self.llm.get_tokenizer().apply_chat_template(
+            messages_dict,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+
+        sampling_params = SamplingParams(temperature=0, structured_outputs=StructuredOutputsParams(json=kwargs.get("json_schema")))
+        outputs  = self.llm.generate(prompt_text, sampling_params)
+        return outputs[0].outputs[0].text
+    
     async def ainvoke(self, messages: list, stream: bool = False):
         return await asyncio.to_thread(self.invoke, messages, stream)
 
@@ -74,6 +100,8 @@ def load_llm(cfg: LLMConfig) -> ChatOpenAI | LLMTransformersWrapper | LLMOllamaW
         return load_llm_openai_langchain_framework(cfg)
     elif (cfg.service == "ollama"):
         return load_llm_ollama_local_framework(cfg)
+    elif (cfg.service == "vllm"):
+        return load_llm_vllm_local_framework(cfg)
     else:
         return load_llm_transformers_local_framework(cfg)
 
@@ -166,4 +194,32 @@ def load_llm_ollama_local_framework(cfg):
     except Exception as e:
         raise RuntimeError(f"No se pudo conectar con Ollama. Asegúrate de que el servicio está activo.\nError: {e}")
 
-    return LLMOllamaWrapper(cfg.model)    
+    return LLMOllamaWrapper(cfg.model)
+
+def load_llm_vllm_local_framework(cfg):
+    """
+    Inicializa un modelo vLLM local y devuelve un objeto con .invoke()
+    que permite generar texto como un LLM normal.
+
+    Parameters
+    ----------
+        `cfg`: LLMConfig
+            - Config of the model instantiated
+
+    Returns
+    -------
+        `llm`: LLMvLLMWrapper
+            - Wrapper que permite ejecutar inferencias directamente con llm.invoke()
+    """
+
+    llm = LLM(model=cfg.model, gpu_memory_utilization=0.4,
+        enable_prefix_caching=True,
+        limit_mm_per_prompt={
+            "image": {"count": 0}, 
+            "video": {"count": 0}
+            },                                      
+        runner="generate",
+        enable_sleep_mode=True
+        ) 
+
+    return LLMvLLMWrapper(llm)
