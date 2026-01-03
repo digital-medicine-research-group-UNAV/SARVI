@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import ollama
 import asyncio
@@ -87,7 +88,10 @@ class LLMvLLMWrapper:
             add_generation_prompt=True
         )
 
-        sampling_params = SamplingParams(temperature=0, structured_outputs=StructuredOutputsParams(json=kwargs.get("json_schema")))
+        with kwargs.get("json_schema").open("r", encoding="utf-8") as f:
+            json_schema_llm_response = json.load(f)
+
+        sampling_params = SamplingParams(temperature=0, structured_outputs=StructuredOutputsParams(json=json_schema_llm_response))
         outputs  = self.llm.generate(prompt_text, sampling_params)
         return outputs[0].outputs[0].text
     
