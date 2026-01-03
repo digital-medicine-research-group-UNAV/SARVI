@@ -77,21 +77,10 @@ class LLMvLLMWrapper:
         self.llm = llm
 
     def invoke(self, messages: list, **kwargs):
-        messages_dict = [
-            {"role": "system", "content": [{"type": "text", "text": messages[0]}]},
-            {"role": "user",   "content": [{"type": "text", "text": messages[1]}]},
-        ]
-
-        prompt_text = self.llm.get_tokenizer().apply_chat_template(
-            messages_dict,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-
         json_schema_llm_response = read_json_single(kwargs.get("json_schema"))
 
         sampling_params = SamplingParams(temperature=0, structured_outputs=StructuredOutputsParams(json=json_schema_llm_response))
-        outputs  = self.llm.generate(prompt_text, sampling_params)
+        outputs  = self.llm.generate(f"System:\n\n{messages[0]}\n\nUser:\n\n{messages[1]}", sampling_params)
         return outputs[0].outputs[0].text
     
     async def ainvoke(self, messages: list, stream: bool = False, **kwargs):
