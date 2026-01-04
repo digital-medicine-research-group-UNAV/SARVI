@@ -1,5 +1,5 @@
 import os
-import json
+import tqdm
 import torch
 import ollama
 import asyncio
@@ -75,12 +75,25 @@ class LLMOllamaWrapper:
 class LLMvLLMWrapper:
     def __init__(self, llm):
         self.llm = llm
+        self._original_tqdm = tqdm.tqdm
+
+    def _silent_tqdm(self, *args, **kwargs):
+        kwargs["disable"] = True
+        return self._original_tqdm(*args, **kwargs)
 
     def invoke(self, messages: list, **kwargs):
-        json_schema_llm_response = read_json_single(kwargs.get("json_schema"))
+        prompt = [
+            {"role": "assistant", "content": [{"type": "text", "text": messages[0]}]},
+            {"role": "user",   "content": [{"type": "text", "text": messages[1]}]},
+        ]
 
-        sampling_params = SamplingParams(temperature=0, structured_outputs=StructuredOutputsParams(json=json_schema_llm_response))
-        outputs  = self.llm.generate(f"System:\n\n{messages[0]}\n\nUser:\n\n{messages[1]}", sampling_params)
+        json_schema_llm_response = read_json_single(kwargs.get("json_schema"))
+        sampling_params = SamplingParams(temperature=0, max_tokens=8192, structured_outputs=StructuredOutputsParams(json=json_schema_llm_response))
+
+        tqdm.tqdm = self._silent_tqdm
+        outputs  = self.llm.chat(prompt, sampling_params, use_tqdm=False)
+        tqdm.tqdm = self._original_tqdm
+
         return outputs[0].outputs[0].text
     
     async def ainvoke(self, messages: list, stream: bool = False, **kwargs):
@@ -205,14 +218,15 @@ def load_llm_vllm_local_framework(cfg):
             - Wrapper que permite ejecutar inferencias directamente con llm.invoke()
     """
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
+    os.environ["VLLM_LOGGING_LEVEL"] = "ERROR"
 
     llm = LLM(model=cfg.model, gpu_memory_utilization=0.4,
         enable_prefix_caching=True,
         limit_mm_per_prompt={
             "image": {"count": 0}, 
             "video": {"count": 0}
-            },                                      
-        runner="generate",
+            },
         enable_sleep_mode=True
         ) 
 
