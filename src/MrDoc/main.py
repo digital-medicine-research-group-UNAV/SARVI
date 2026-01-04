@@ -12,7 +12,7 @@ from .logging_redirect import enable_stdout_logging
 from .core.create_jsons_per_llm_model import run_docx_to_jsons_sync, run_docx_to_jsons_async
 from .core.complete_excel_per_llm_model import run_jsons_to_xlsx_sync, run_jsons_to_xlsx_async
 
-def terminate_process() -> None:
+def terminate_process(**kwargs) -> None:
     with contextlib.suppress(Exception):
         torch.distributed.destroy_process_group()
     gc.collect()
