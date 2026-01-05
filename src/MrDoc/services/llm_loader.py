@@ -101,7 +101,7 @@ class LLMvLLMWrapper:
 
 #################################################################################################################
 
-def load_llm(cfg: LLMConfig) -> ChatOpenAI | LLMTransformersWrapper | LLMOllamaWrapper:
+def load_llm(cfg: LLMConfig) -> ChatOpenAI | LLMTransformersWrapper | LLMOllamaWrapper | LLMvLLMWrapper:
     if (cfg.service == "openai"):
         return load_llm_openai_langchain_framework(cfg)
     elif (cfg.service == "ollama"):
