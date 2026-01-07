@@ -83,6 +83,12 @@ def read_json_single(path: Path) -> dict:
 
     return data
 
+def read_jsonl_single(path: Path) -> list:
+    data = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            data.append(json.loads(line))
+    return data
 
 def read_json_diagnosticos(folders: list[Path]) -> dict[str, dict]:
     """
