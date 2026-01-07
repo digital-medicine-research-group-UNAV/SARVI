@@ -196,7 +196,7 @@ async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_e
     prompt = f"[REF]{diagnostico_extraido}[CODE]{CIE10_codigo}[DESC]{CIE10_descripción}"
     inputs = cie10_judger_tokenizer(prompt, return_tensors="pt", truncation=True, padding="max_length", max_length=256).to(device)
     with torch.no_grad():
-        outputs = cie10_judger_model(**inputs)
+        outputs = cie10_judger_model(**inputs, disable_tqdm=True)
         logits = outputs.logits
         prediction = logits.argmax(dim=-1).item()
 
