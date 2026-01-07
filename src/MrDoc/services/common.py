@@ -11,6 +11,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 from sentence_transformers.util import cos_sim
 from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from ..io.reader import load_schema_info
 from ..config import BASE_DIR
@@ -23,6 +24,10 @@ PARTIAL_RE = re.compile(r"[A-Z][A-Za-z0-9]{1,2}(?:\.[A-Za-z0-9]{1,})?", re.I)
 LLM_TRUNCATED_OUTPUT = re.compile(r'\{(?:[^{}"]|"(?:(?:\\.)|[^"\\])*")*\}', flags=re.DOTALL)
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+cie10_judger_tokenizer = AutoTokenizer.from_pretrained("JulenRM/bsc-bio-ehr-es-CIE10Judger")
+cie10_judger_model = AutoModelForSequenceClassification.from_pretrained("JulenRM/bsc-bio-ehr-es-CIE10Judger").to(device)
 ###
 
 def procesar_json_diagnosticos(data: dict[str, dict]) -> pd.DataFrame:
