@@ -19,6 +19,9 @@ from .common import (
     clean_single_cie10_value,
     find_CIE10_similars,
     validate_json_created,
+    cie10_judger_tokenizer,
+    cie10_judger_model,
+    device
 )
 
 def procesar_docx(informe_texto: str, report: Path, prompt: str, llm, json_parse: bool, docs_dir: Path):
@@ -174,33 +177,44 @@ def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_extraid
         `respuesta_llm`: dict
             - Respuesta del LLM directamente en formato dict/json
     """
-    if json_parse:
-        messages = [prompt,
-                    f"""
-                        ```json
-                        {{
-                            "CIE10_codigo": "{CIE10_codigo}"
-                            "CIE10_descripción": "{CIE10_descripción}"
-                            "diagnostico_extraido": "{diagnostico_extraido}"
-                            "contexto": "{contexto}"
-                        }}
-                        ```
-                    """]
+    # if json_parse:
+    #     messages = [prompt,
+    #                 f"""
+    #                     ```json
+    #                     {{
+    #                         "CIE10_codigo": "{CIE10_codigo}"
+    #                         "CIE10_descripción": "{CIE10_descripción}"
+    #                         "diagnostico_extraido": "{diagnostico_extraido}"
+    #                         "contexto": "{contexto}"
+    #                     }}
+    #                     ```
+    #                 """]
 
-    else:
-        messages = [SystemMessage(content=prompt),
-                    HumanMessage(content=f"""
-                                            ```json
-                                            {{
-                                                "CIE10_codigo": "{CIE10_codigo}"
-                                                "CIE10_descripción": "{CIE10_descripción}"
-                                                "diagnostico_extraido": "{diagnostico_extraido}"
-                                                "contexto": "{contexto}"
-                                            }}
-                                            ```
-                                        """)]
+    # else:
+    #     messages = [SystemMessage(content=prompt),
+    #                 HumanMessage(content=f"""
+    #                                         ```json
+    #                                         {{
+    #                                             "CIE10_codigo": "{CIE10_codigo}"
+    #                                             "CIE10_descripción": "{CIE10_descripción}"
+    #                                             "diagnostico_extraido": "{diagnostico_extraido}"
+    #                                             "contexto": "{contexto}"
+    #                                         }}
+    #                                         ```
+    #                                     """)]
 
-    answer = llm.invoke(messages, json_schema=docs_dir / "esquema_juzgar.json")
+    # answer = llm.invoke(messages, json_schema=docs_dir / "esquema_juzgar.json")
+
+    prompt = f"[REF]{diagnostico_extraido}[CODE]{CIE10_codigo}[DESC]{CIE10_descripción}"
+    inputs = cie10_judger_tokenizer(prompt, return_tensors="pt", truncation=True, padding="max_length", max_length=256).to(device)
+    with torch.no_grad():
+        outputs = cie10_judger_model(**inputs)
+        logits = outputs.logits
+        prediction = logits.argmax(dim=-1).item()
+
+    answer = f"""```json
+    {json.dumps({"resultado": True if prediction==1 else False})}
+    ```"""
     
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)
