@@ -26,8 +26,8 @@ LLM_TRUNCATED_OUTPUT = re.compile(r'\{(?:[^{}"]|"(?:(?:\\.)|[^"\\])*")*\}', flag
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-cie10_judger_tokenizer = AutoTokenizer.from_pretrained("JulenRM/bsc-bio-ehr-es-CIE10Judger")
-cie10_judger_model = AutoModelForSequenceClassification.from_pretrained("JulenRM/bsc-bio-ehr-es-CIE10Judger").to(device)
+cie10_judger_tokenizer = AutoTokenizer.from_pretrained("JulenRM/RigoBERTa-Clinical_CIE10Judger")
+cie10_judger_model = AutoModelForSequenceClassification.from_pretrained("JulenRM/RigoBERTa-Clinical_CIE10Judger").to(device)
 ###
 
 def procesar_json_diagnosticos(data: dict[str, dict]) -> pd.DataFrame:
