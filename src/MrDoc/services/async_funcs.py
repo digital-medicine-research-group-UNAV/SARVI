@@ -193,7 +193,7 @@ async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_e
     # answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_juzgar.json")
     # answer = answer.content
 
-    prompt = f"[REF]{diagnostico_extraido}[CODE]{CIE10_codigo}[DESC]{CIE10_descripción}"
+    prompt = f"[REF]{diagnostico_extraido.lower()}[CODE]{CIE10_codigo.upper()}[DESC]{CIE10_descripción.lower()}"
     inputs = cie10_judger_tokenizer(prompt, return_tensors="pt", truncation=True, padding="max_length", max_length=256).to(device)
     with torch.no_grad():
         outputs = cie10_judger_model(**inputs, disable_tqdm=True)
