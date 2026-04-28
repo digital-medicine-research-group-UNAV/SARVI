@@ -5,6 +5,7 @@ import json
 import yaml
 import torch
 import string
+import warnings
 import contextlib
 import numpy as np
 import pandas as pd
@@ -16,15 +17,17 @@ from text_to_num import text2num
 import xml.etree.ElementTree as ET
 from IPython.display import HTML, display
 from torch.utils.data import DataLoader
+from hierarchicalsoftmax import SoftmaxNode
 from jsonschema import Draft202012Validator
+from collections import defaultdict
 from jsonschema.exceptions import ValidationError
 from sentence_transformers.util import cos_sim
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 
-from ..io.reader import load_schema_info, read_checkpoint
+from ..io.reader import load_schema_info, read_torch_checkpoint, read_parquet_file
 from ..config import BASE_DIR
-from ..models import Any, PipelineContext, SpanDataset, SpanClassifier
+from ..models import Any, PipelineContext, SpanDataset, SpanClassifier, ICD10Dataset, ICD10Predictor_HS_Head, ICD10Predictor_HS_CrossEntropyLoss, ICD10Predictor_NO_HS
 
 ###
 with open(BASE_DIR / "docs" / "prompts.yml", 'r', encoding='utf-8') as file:
@@ -34,8 +37,8 @@ PARTIAL_RE = re.compile(r"[A-Z][A-Za-z0-9]{1,2}(?:\.[A-Za-z0-9]{1,})?", re.I)
 LLM_TRUNCATED_OUTPUT = re.compile(r'\{(?:[^{}"]|"(?:(?:\\.)|[^"\\])*")*\}', flags=re.DOTALL)
 
 stopwords_es = list(set(get_stop_words('spanish')+list(string.ascii_lowercase)+["ñ","ç","ch"]))
-id2label = {0: 'ACTOR', 1: 'CLINENTITY', 2: 'O', 3: 'TIMEX3'}
-label2id = {'ACTOR': 0, 'CLINENTITY': 1, 'O': 2, 'TIMEX3': 3}
+id2label_ner = {0: 'ACTOR', 1: 'CLINENTITY', 2: 'O', 3: 'TIMEX3'}
+label2id_ner = {'ACTOR': 0, 'CLINENTITY': 1, 'O': 2, 'TIMEX3': 3}
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -1181,25 +1184,22 @@ def span_collate_fn(batch):
     span_reprs = []
     cls_reprs = []
     span_widths = []
-    labels = []
 
-    for span_repr, cls_repr, span_width, label in batch:
+    for span_repr, cls_repr, span_width in batch:
         span_reprs.append(span_repr)
         cls_reprs.append(cls_repr)
         span_widths.append(span_width)
-        labels.append(label)
 
     span_reprs = torch.stack(span_reprs)   # [N, span_dim]
     cls_reprs = torch.stack(cls_reprs)     # [N, cls_dim]
     span_widths = torch.stack(span_widths) # [N]
-    labels = torch.stack(labels)           # [N]
 
-    return span_reprs, cls_reprs, span_widths, labels
+    return span_reprs, cls_reprs, span_widths
 
-def initialize_span_ner_model(ctx: PipelineContext) -> SpanClassifier:
-    checkpoint = read_checkpoint(ctx)
+def initialize_span_ner_model(ctx: PipelineContext, checkpoint_name: str) -> SpanClassifier:
+    checkpoint = read_torch_checkpoint(ctx, checkpoint_name)
 
-    model = SpanClassifier(span_dim=1024, cls_dim=1024, num_classes=len(id2label), max_span_width=15).to(device)
+    model = SpanClassifier(span_dim=1024, cls_dim=1024, num_classes=len(id2label_ner), max_span_width=15).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
     return model
@@ -1375,3 +1375,677 @@ def get_final_entity_components_from_group(group: pd.DataFrame, token_idx_col: s
         components.append({"source_row_indices": [x["row_index"] for x in component], "final_token_idx": final_token_idx})
 
     return components
+
+def parse_range(code: str):
+    """
+    Extrae la letra inicial y los límites numéricos de un código de rango.
+
+    Parameters
+    ----------
+        `code`: str
+            - Código de rango con formato tipo **M00-M25**
+
+    Returns
+    -------
+        `letter`, `start_num`, `end_num`: tuple
+            - Tupla formada por la letra del código, el número inicial y el número final del rango
+    """
+    start, end = code.split("-")
+    letter = start[0]
+    start_num = int("".join(c if c.isdigit() else "9" for c in start[1:]))
+    end_num = int("".join(c if c.isdigit() else "9" for c in end[1:]))
+    return letter, start_num, end_num
+
+def is_valid(code: str):
+    """
+    Comprueba si un código individual o de rango tiene un formato válido.
+
+    Parameters
+    ----------
+        `code`: str
+            - Código que se quiere validar. Puede ser un código simple, como **M01**, o un rango, como **M00-M25**
+
+    Returns
+    -------
+        ``: bool
+            - ``True`` si el código es válido. En caso contrario, devuelve ``False``.
+    """
+    if len(code) == 3:
+        return True
+    elif "-" not in code:
+        return False
+
+    a, b = code.split("-")
+    if a == b or a[0] != b[0]:
+        return False
+    else:
+        return True
+    
+def normalize_code(code: str):
+    """
+    Normaliza un código para poder ordenarlo o compararlo numéricamente.
+
+    Parameters
+    ----------
+        `code`: str
+            - Código que se quiere normalizar. Si contiene letras en la parte numérica estas se sustituyen por **9** para facilitar la comparación
+
+    Returns
+    -------
+        `letter`, `num`: tuple
+            - Tupla formada por la letra inicial del código y su valor numérico normalizado
+    """
+    letter = code[0]
+    rest = code[1:]
+
+    if rest.isdigit():
+        return letter, int(rest)
+
+    num = ""
+    for c in rest:
+        if c.isdigit():
+            num += c
+        else:
+            num += "9"
+
+    return letter, int(num)
+
+def is_code_in_range(code: str, range_code: str):
+    """
+    Comprueba si un código pertenece a un rango determinado.
+
+    Parameters
+    ----------
+        `code`: str
+            - Código individual que se quiere comprobar, por ejemplo **M01** o **M1A**
+
+        `range_code`: str
+            - Código de rango contra el que se compara, por ejemplo **M00-M25**
+
+    Returns
+    -------
+        ``: bool
+            - **True** si el código está dentro del rango indicado. En caso contrario, devuelve **False**
+    """
+    start, end = range_code.split("-")
+
+    if not code[1:].isdigit():
+        return code == start or code == end
+
+    l1, v = normalize_code(code)
+    l2, v_start = normalize_code(start)
+    l3, v_end = normalize_code(end)
+
+    if l1 != l2 or l1 != l3:
+        return False
+
+    return v_start <= v <= v_end
+
+def is_numeric_leaf_code(code: str):
+    """
+    Comprueba si un código es una hoja numérica simple.
+
+    Parameters
+    ----------
+        `code`: str
+            - Código que se quiere comprobar.
+
+    Returns
+    -------
+        ``: bool
+            - **True** si el código no es un rango, empieza por una letra y el resto está formado solo por dígitos. En caso contrario, devuelve **False**.
+    """
+    return "-" not in code and len(code) >= 2 and code[0].isalpha() and code[1:].isdigit()
+
+
+def are_consecutive_codes(a: str, b: str):
+    """
+    Comprueba si dos códigos numéricos simples son consecutivos.
+
+    Parameters
+    ----------
+        `a`: str
+            - Primer código.
+
+        `b`: str
+            - Segundo código.
+
+    Returns
+    -------
+        ``: bool
+            - ``True`` si ambos códigos pertenecen a la misma letra y el segundo código
+              es exactamente el siguiente al primero. En caso contrario, devuelve
+              ``False``.
+    """
+    if not (is_numeric_leaf_code(a) and is_numeric_leaf_code(b)):
+        return False
+    la, va = normalize_code(a)
+    lb, vb = normalize_code(b)
+    return la == lb and vb == va + 1
+
+def make_range_name(codes: list):
+    """
+    Genera el nombre de un rango a partir de una lista de códigos numéricos.
+
+    Parameters
+    ----------
+        `codes`: list
+            - Lista de códigos numéricos simples pertenecientes a la misma letra
+
+    Returns
+    -------
+        ``: str
+            - Nombre del rango formado por el mínimo y el máximo código de la lista, manteniendo el ancho numérico original
+    """
+    letter = codes[0][0]
+    nums = [int(c[1:]) for c in codes]
+    width = max(len(c) - 1 for c in codes)
+    return f"{letter}{min(nums):0{width}d}-{letter}{max(nums):0{width}d}"
+
+def range_matches_children(parent_name: str, child_names: list):
+    """
+    Comprueba si un nodo padre de tipo rango representa exactamente el rango natural cubierto por sus hijos numéricos.
+
+    Parameters
+    ----------
+        `parent_name`: str
+            - Nombre del nodo padre, normalmente un rango como **A00-A09**
+
+        `child_names`: list
+            - Lista de nombres de nodos hijos numéricos
+
+    Returns
+    -------
+        ``: bool
+            - **True** si el rango del padre coincide con el mínimo y máximo de sus hijos. En caso contrario, devuelve **False**
+    """
+    if "-" not in parent_name or not child_names:
+        return False
+
+    letter, start_num, end_num = parse_range(parent_name)
+
+    if not all(is_numeric_leaf_code(c) and c[0] == letter for c in child_names):
+        return False
+
+    values = [int(c[1:]) for c in child_names]
+    return min(values) == start_num and max(values) == end_num
+
+def create_synthetic_node(node_dict: dict, visible_name: str, description:str = None, alpha: float = 2.0, gamma: float = 2.0):
+    """
+    Crea un nodo sintético nuevo y lo añade al diccionario de nodos.
+
+    Parameters
+    ----------
+        `node_dict`: dict
+            - Diccionario donde se almacenan los nodos del árbol
+
+        `visible_name`: str
+            - Nombre visible del nodo que aparecerá en el árbol
+
+        `description`: str
+            - Descripción asociada al nodo. Si no se indica, se usa **visible_name**
+
+        `alpha`: float
+            - Valor de `alpha` usado al crear el `SoftmaxNode`. Por defecto es **2.0**
+
+        `gamma`: float
+            - Valor de `gamma` usado al crear el `SoftmaxNode`. Por defecto es **2.0**
+
+    Returns
+    -------
+        `node`: SoftmaxNode
+            - Nodo sintético creado y añadido a `node_dict`
+    """
+    key = visible_name
+    if key in node_dict:
+        i = 1
+        while f"__synthetic__{visible_name}__{i}" in node_dict:
+            i += 1
+        key = f"__synthetic__{visible_name}__{i}"
+
+    node = SoftmaxNode(visible_name, parent=None, description=description or visible_name, alpha=alpha, gamma=gamma)
+    node_dict[key] = node
+    return node
+
+def add_min_consecutive_subgroups(node_dict: dict):
+    """
+    Refina un árbol jerárquico creando subgrupos mínimos de códigos consecutivos.
+
+    Parameters
+    ----------
+        `node_dict`: dict
+            - Diccionario con todos los nodos del árbol. Debe contener la clave **root**
+
+    Returns
+    -------
+        ``: None
+            - Modifica directamente los hijos de los nodos dentro de `node_dict`
+    """
+    root = node_dict["root"]
+
+    def recurse(node):
+        # 1) Primero bajar: nivel más bajo posible
+        for child in list(node.children):
+            recurse(child)
+
+        children = list(node.children)
+
+        # Leaves numéricos directos de este nodo
+        numeric_leaves = [child for child in children if len(child.children) == 0 and is_numeric_leaf_code(child.name)]
+
+        if len(numeric_leaves) < 2:
+            return
+
+        numeric_names = [child.name for child in numeric_leaves]
+
+        # ¿Este nodo ya es el contenedor correcto de esos leaves?
+        parent_already_is_container = ("-" in node.name and len(children) == len(numeric_leaves) and range_matches_children(node.name, numeric_names))
+        working_node = node
+
+        # 2) Si no lo es, crear contenedor intermedio
+        #    Ej: bajo M, agrupar M95,M96,M97,M99 -> M95-M99
+        if not parent_already_is_container:
+            container_name = make_range_name(numeric_names)
+            container = create_synthetic_node(node_dict, visible_name=container_name, description=container_name, alpha=2.0, gamma=2.0)
+
+            new_children = []
+            inserted = False
+
+            for child in children:
+                if child in numeric_leaves:
+                    if not inserted:
+                        new_children.append(container)
+                        inserted = True
+                    continue
+                new_children.append(child)
+
+            node.children = tuple(new_children)
+            container.children = tuple(numeric_leaves)
+            working_node = container
+
+        # 3) Dentro del contenedor correcto, agrupar pares consecutivos
+        children = list(working_node.children)
+        new_children = []
+        i = 0
+
+        while i < len(children):
+            current_child = children[i]
+
+            can_pair = (i + 1 < len(children) and len(current_child.children) == 0 and is_numeric_leaf_code(current_child.name) and len(children[i + 1].children) == 0 and is_numeric_leaf_code(children[i + 1].name) and are_consecutive_codes(current_child.name, children[i + 1].name))
+
+            if can_pair:
+                next_child = children[i + 1]
+                pair_name = make_range_name([current_child.name, next_child.name])
+
+                # Evita duplicar algo como:
+                # M26-M27
+                #   └── M26-M27
+                #       ├── M26
+                #       └── M27
+                if not (pair_name == working_node.name and len(children) == 2):
+                    pair_node = create_synthetic_node(node_dict, visible_name=pair_name, description=pair_name, alpha=2.0, gamma=2.0)
+                    pair_node.children = (current_child, next_child)
+                    new_children.append(pair_node)
+                    i += 2
+                    continue
+
+            new_children.append(current_child)
+            i += 1
+
+        working_node.children = tuple(new_children)
+
+    recurse(root)
+
+def embed_texts(texts: list, batch_size: int = 64, max_length: int = 512, show_tqdm: bool = False):
+    """
+    Genera embeddings para una lista de textos usando el tokenizer y el modelo NER, aplicando pooling medio sobre los estados ocultos de los tokens.
+
+    Parameters
+    ----------
+        `texts`: list
+            - Lista de textos que se quieren convertir en embeddings
+
+        `batch_size`: int
+            - Número de textos procesados en cada batch. Por defecto es **64**
+
+        `max_length`: int
+            - Longitud máxima de tokens permitida por texto durante la tokenización. Por defecto es **512**
+
+        `show_tqdm`: bool
+            - Indica si se debe mostrar una barra de progreso con **tqdm**. Por defecto es **False**
+
+    Returns
+    -------
+        `embeddings`: torch.Tensor
+            - Tensor con los embeddings de todos los textos, reconstruidos en el mismo orden que la lista original de entrada
+    """
+    cache = {}
+
+    new_texts = [t for t in texts if t not in cache]
+    new_texts = list(set(new_texts))
+
+    with torch.no_grad():
+        iterator = range(0, len(new_texts), batch_size)
+        if show_tqdm:
+            iterator = tqdm(iterator)
+        for i in iterator:
+            batch = new_texts[i:i+batch_size]
+            
+            tokens = tokenizer_ner(batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt", add_special_tokens=False)
+            tokens = {k: v.to(device) for k, v in tokens.items()}
+
+            outputs = model_ner(**tokens)
+            hidden = outputs.last_hidden_state
+
+            mask = tokens["attention_mask"].unsqueeze(-1)
+            pooled = (hidden * mask).sum(1) / mask.sum(1)
+
+            pooled = pooled.cpu()
+
+            for text, emb in zip(batch, pooled):
+                cache[text] = emb
+
+    # rebuild embeddings in original order
+    embeddings = [cache[t] for t in texts]
+    return torch.stack(embeddings)
+
+def create_all_labels_desc(label2id):
+    """
+    Crea un diccionario de embeddings de descripciones para todas las etiquetas, combinando información de distintos conjuntos de datos.
+
+    Parameters
+    ----------
+        `label2id`: dict
+            - Diccionario con la traduccion de códigos a ids
+
+    Returns
+    -------
+        `all_labels_desc`: dict
+            - Diccionario donde cada clave es el ID numérico de una etiqueta y cada valor es un tensor con los embeddings de las descripciones asociadas a esa etiqueta
+    """
+    df = read_parquet_file("full_icd10_2026.parquet")
+    df["target_id"] = df["Code Perceiver"].map(label2id)
+
+    all_labels_desc_ORIGINAL = defaultdict(list)
+    for code in tqdm(df.groupby(["target_id"], group_keys=True)[["Description"]]):
+        all_labels_desc_ORIGINAL[code[0][0]] = code[1]["Description"].to_list()
+
+    ####################################
+
+    df = read_parquet_file("codiesp_train.parquet")
+    df = df[df["All Code Full"].str.len() > 0]
+    df["target_id"] = df["All Code Perceiver"].apply(lambda x: [label2id[c] for c in x])
+
+    all_labels_desc_CODIESP = defaultdict(list)
+    for _,row in tqdm(df.iterrows(), total=len(df)):
+        for code,desc in zip(row["target_id"], row["All Description"]):
+            all_labels_desc_CODIESP[code].append(desc)
+
+    ####################################
+
+    df = read_parquet_file("cares_train.parquet")
+    df = df[df["All Code Full"].str.len() > 0]
+    df["target_id"] = df["All Code Perceiver"].apply(lambda x: [label2id[c] for c in x])
+
+    all_labels_desc_CARES = defaultdict(list)
+    for _,row in tqdm(df.iterrows(), total=len(df)):
+        for code,desc in zip(row["target_id"], row["All Description"]):
+            all_labels_desc_CARES[code].append(desc)
+
+    ####################################
+
+    df = read_parquet_file("cares_test.parquet")
+    df = df[df["All Code Full"].str.len() > 0]
+    df["target_id"] = df["All Code Perceiver"].apply(lambda x: [label2id[c] for c in x])
+
+    for _,row in tqdm(df.iterrows(), total=len(df)):
+        for code,desc in zip(row["target_id"], row["All Description"]):
+            all_labels_desc_CARES[code].append(desc)
+
+    ####################################
+
+    df = read_parquet_file("not_codiesp_cares_general.parquet")
+    all_labels_desc_REST = dict(zip(df["All Code Full"].map(label2id), df["All Description"]))
+    
+    ####################################
+
+    all_labels_desc = {}
+
+    for code in tqdm(all_labels_desc_ORIGINAL.keys(), total=len(all_labels_desc_ORIGINAL)):
+        codes_desc_REAL = list(set(all_labels_desc_CODIESP[code] + all_labels_desc_CARES[code]))
+        if codes_desc_REAL == []:
+            codes_desc_REAL = list(set(all_labels_desc_REST[code]))
+        codes_desc_REAL = list(set(codes_desc_REAL + [all_labels_desc_ORIGINAL[code][0]]))
+        all_labels_desc[code] = embed_texts(codes_desc_REAL, show_tqdm=False)
+
+    return all_labels_desc
+
+def initialize_icd10_hs_head_model(ctx: PipelineContext, name: str, root: SoftmaxNode) -> ICD10Predictor_HS_Head:
+    checkpoint = read_torch_checkpoint(ctx, name)
+
+    model = ICD10Predictor_HS_Head(root).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    return model
+
+def initialize_icd10_hs_prediction_model(ctx: PipelineContext, name: str, label2id: dict, root: SoftmaxNode, internal_K: int = 3) -> ICD10Predictor_HS_CrossEntropyLoss:
+    checkpoint = read_torch_checkpoint(ctx, name)
+
+    all_labels_desc = create_all_labels_desc(label2id)
+
+    model = ICD10Predictor_HS_CrossEntropyLoss(root, all_labels_desc, internal_K).to(device)
+    model.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    return model
+
+def initialize_icd10_no_hs_head_model(ctx: PipelineContext, name: str, label2id: dict, root: SoftmaxNode) -> ICD10Predictor_NO_HS:
+    checkpoint = read_torch_checkpoint(ctx, name)
+
+    all_labels_desc = create_all_labels_desc(label2id)
+
+    model = ICD10Predictor_NO_HS(root, all_labels_desc).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    return model
+
+def tensor_to_item(x: Any):
+    """
+    Convierte tensores de PyTorch en valores escalares, manteniendo la estructura original de listas, tuplas y diccionarios.
+
+    Parameters
+    ----------
+        `x`: Any
+            - Objeto que se quiere convertir. Puede ser un tensor, una lista, una tupla, un diccionario u otro tipo de dato
+
+    Returns
+    -------
+        ``: Any
+            - Objeto convertido. Si es un tensor, devuelve su valor mediante **item()**. Si es una estructura anidada, convierte recursivamente sus elementos.
+    """
+    if isinstance(x, torch.Tensor):
+        return x.item()
+
+    elif isinstance(x, list):
+        return [tensor_to_item(item) for item in x]
+
+    elif isinstance(x, tuple):
+        return tuple(tensor_to_item(item) for item in x)
+
+    elif isinstance(x, dict):
+        return {k: tensor_to_item(v) for k, v in x.items()}
+
+    else:
+        return x
+
+def tensor_items_same_structure(obj: Any):
+    """
+    Convierte tensores de PyTorch a valores nativos de Python o listas, conservando la misma estructura del objeto original.
+
+    Parameters
+    ----------
+        `obj`: Any
+            - Objeto que se quiere convertir. Puede ser un tensor, una lista, una tupla, un diccionario u otro tipo de dato
+
+    Returns
+    -------
+        ``: Any
+            - Objeto con la misma estructura que la entrada. Los tensores escalares se convierten con **item()** y los tensores no escalares se convierten a listas usando **detach().cpu().tolist()**
+    """
+    if isinstance(obj, torch.Tensor):
+        if obj.dim() == 0:
+            return obj.item()
+        return obj.detach().cpu().tolist()
+
+    elif isinstance(obj, tuple):
+        return tuple(tensor_items_same_structure(x) for x in obj)
+
+    elif isinstance(obj, list):
+        return [tensor_items_same_structure(x) for x in obj]
+
+    elif isinstance(obj, dict):
+        return {k: tensor_items_same_structure(v) for k, v in obj.items()}
+
+    return obj
+
+def remap_ids(x: Any, id_no_hs_to_id_hs: dict):
+    """
+    Remapea IDs de forma recursiva usando un diccionario de correspondencias.
+
+    Parameters
+    ----------
+        `x`: Any
+            - Objeto que contiene los IDs que se quieren remapear. Puede ser un entero, una lista, una tupla, un diccionario u otro tipo de dato
+
+        `id_no_hs_to_id_hs`: dict
+            - Diccionario que mapea IDs originales a nuevos IDs
+
+    Returns
+    -------
+        ``: Any
+            - Objeto con la misma estructura que la entrada, pero con los IDs enteros sustituidos por sus valores correspondientes en `id_no_hs_to_id_hs`. Los tipos no contemplados se devuelven sin modificar
+    """
+    if isinstance(x, int):
+        return id_no_hs_to_id_hs[x]
+    elif isinstance(x, list):
+        return [remap_ids(item, id_no_hs_to_id_hs) for item in x]
+    elif isinstance(x, tuple):
+        return tuple(remap_ids(item, id_no_hs_to_id_hs) for item in x)
+    elif isinstance(x, dict):
+        return {k: remap_ids(v, id_no_hs_to_id_hs) for k, v in x.items()}
+    else:
+        return x
+    
+def tensor_a_float(x: Any):
+    """
+    Convierte un valor a **float**, contemplando tensores, listas y escalares.
+
+    Parameters
+    ----------
+        `x`: Any
+            - Valor que se quiere convertir. Puede ser un tensor de PyTorch, una lista o un valor escalar convertible a **float**
+
+    Returns
+    -------
+        ``: float
+            - Valor convertido a ``float``. Si es un tensor, se toma el primer elemento tras moverlo a CPU. Si es una lista, se convierte su primer elemento
+    """
+    if isinstance(x, torch.Tensor):
+        return float(x.detach().cpu().reshape(-1)[0].item())
+    if isinstance(x, list):
+        return float(x[0])
+    return float(x)
+
+def valor_normal(x: Any):
+    """
+    Normaliza valores para facilitar comparaciones entre tensores, arrays, listas, tuplas y escalares
+
+    Parameters
+    ----------
+        `x`: Any
+            - Valor que se quiere normalizar. Puede ser un tensor de PyTorch, un array de NumPy, una lista, una tupla, un escalar de NumPy o un escalar normal
+
+    Returns
+    -------
+        ``: Any
+            - Valor normalizado. Si contiene un único elemento, devuelve el escalar correspondiente. Si contiene varios elementos, devuelve una lista con los valores normalizados
+    """
+    # Tensor de torch
+    if isinstance(x, torch.Tensor):
+        x = x.detach().cpu()
+        if x.numel() == 1:
+            return x.reshape(-1)[0].item()
+        return x.tolist()
+
+    # Array de numpy
+    if isinstance(x, np.ndarray):
+        if x.size == 1:
+            return x.reshape(-1)[0].item()
+        return x.tolist()
+
+    # Lista o tupla de un elemento
+    if isinstance(x, (list, tuple)):
+        if len(x) == 1:
+            return valor_normal(x[0])
+        return [valor_normal(v) for v in x]
+
+    # Escalares numpy
+    if hasattr(x, "item") and callable(x.item):
+        try:
+            return x.item()
+        except:
+            pass
+
+    return x
+
+def extract_flattened_predictions(data: list, all_preds: list):
+    """
+    Extrae y aplana las predicciones guardadas en una estructura anidada, validando que coincidan con las predicciones globales recibidas.
+
+    Parameters
+    ----------
+        `data`: list
+            - Estructura anidada que contiene grupos de datos. Cada grupo debe contener, en su segunda posición, listas de arrays o tuplas con valores de predicción
+
+        `all_preds`: list
+            - Lista o array con las predicciones globales que se usan para comprobar la coherencia con los valores extraídos de `data`
+
+    Returns
+    -------
+        `flattened_predictions`: list
+            - Lista de series de predicciones aplanadas. Cada elemento contiene los valores convertidos a **float** correspondientes a una secuencia extraída
+    """
+    flattened_predictions = []
+    indice_global = 0
+
+    for grupo_idx, grupo in enumerate(data):
+        if len(grupo) <= 1:
+            continue
+
+        lista_arrays_tuplas = grupo[1]
+
+        for arr_idx, arr_tuplas in enumerate(lista_arrays_tuplas):
+            if len(arr_tuplas) == 0:
+                continue
+
+            valores = []
+            for tupla_paso in arr_tuplas:
+                valores.append(tensor_a_float(tupla_paso[0]))
+
+            flattened_predictions.append(valores)
+
+            if indice_global >= len(all_preds):
+                warnings.warn(f"No hay suficientes elementos en all_targets/all_preds para la serie {indice_global}.")
+                break
+
+            ultimo_segundo_valor = valor_normal(arr_tuplas[-1][1])
+            pred_actual = valor_normal(all_preds[indice_global])
+
+            if ultimo_segundo_valor != pred_actual:
+                warnings.warn(f"Desajuste en índice {indice_global}: all_preds[{indice_global}]={pred_actual} pero el segundo valor de la última tupla es {ultimo_segundo_valor}. (grupo={grupo_idx}, elemento={arr_idx})")
+
+            indice_global += 1
+
+    if len(all_preds) != len(flattened_predictions):
+        warnings.warn(f"Número de series ({len(flattened_predictions)}) distinto de ({len(all_preds)}).")
+
+    return flattened_predictions

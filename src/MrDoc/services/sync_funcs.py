@@ -20,7 +20,20 @@ from .common import (
     SpanClassifier,
     DataLoader,
     series_to_striding_ner_windows,
+    SoftmaxNode,
+    is_code_in_range,
+    normalize_code,
+    parse_range,
+    is_valid,
+    add_min_consecutive_subgroups,
+    defaultdict,
     average_overlapping_hidden_states_checked,
+    embed_texts,
+    ICD10Dataset,
+    ICD10Predictor_HS_Head,
+    ICD10Predictor_HS_CrossEntropyLoss,
+    ICD10Predictor_NO_HS,
+    tensor_items_same_structure,
     generate_sequences,
     is_valid_decoder,
     span_collate_fn,
@@ -101,7 +114,7 @@ def prepare_data(data: pd.DataFrame, padding: bool, tokenizer: Any, model: Any, 
 
     return data_prepared
 
-def construct_dataset(data: list, tokenizer: Any, skip_incomplete_spans: bool = True):
+def construct_dataset_ner(data: list, tokenizer: Any, skip_incomplete_spans: bool = True):
     """
     Construye un dataset a partir de una lista de ventanas procesadas, generando secuencias de spans de tokens y asociándolas con sus embeddings correspondientes.
 
@@ -173,7 +186,7 @@ def construct_loaders_ner(data: list, tokenizer: Any, skip_incomplete_spans: boo
                 - `dataframe`: DataFrame construido a partir de los datos de entrada
                 - `test_loader`: DataLoader que permite iterar sobre el dataset por lotes
     """
-    dataframe = construct_dataset(data, tokenizer, skip_incomplete_spans=skip_incomplete_spans)
+    dataframe = construct_dataset_ner(data, tokenizer, skip_incomplete_spans=skip_incomplete_spans)
 
     batch_size = 32
 
@@ -203,40 +216,35 @@ def run_ner_model(model: SpanClassifier, data_loader: DataLoader, device: torch.
 
     Returns
     -------
-        `all_true, all_pred, all_value_preds`: tuple
+        `all_pred`, `all_value_preds`: tuple
             - Tupla formada por:
-                - `all_true`: array con las etiquetas reales.
                 - `all_pred`: array con las clases predichas por el modelo.
                 - `all_value_preds`: array con las probabilidades predichas para cada clase.
     """
     model.eval()
 
-    all_true = []
     all_pred = []
     all_value_preds = []
 
     with torch.no_grad():
         for batch in tqdm(data_loader):
-            span_repr, cls_repr, span_widths, labels = batch
+            span_repr, cls_repr, span_widths = batch
 
             span_repr = span_repr.to(device)
             cls_repr = cls_repr.to(device)
             span_widths = span_widths.to(device)
-            labels = labels.to(device)
 
             logits = model(span_repr, cls_repr, span_widths)
             value_preds = torch.softmax(logits, dim=-1)
             preds = torch.argmax(value_preds, dim=-1)
 
-            all_true.append(labels.cpu().numpy())
             all_pred.append(preds.cpu().numpy())
             all_value_preds.append(value_preds.cpu().numpy())
             
-    all_true = np.concatenate(all_true)
     all_pred = np.concatenate(all_pred)
     all_value_preds = np.concatenate(all_value_preds)
 
-    return all_true, all_pred, all_value_preds
+    return all_pred, all_value_preds
 
 def update_df_with_final_pred_entities(df: pd.DataFrame, file_col: str = "File", token_idx_col: str = "Token idx", text_instance_col: str = "Text instance", label_col: str = "pred_label", id_col: str = "pred_id", outside_label: str = "O", outside_id: int = 2, fallback_when_final_span_missing: str = "max_existing"):
     """
@@ -385,6 +393,317 @@ def update_df_with_final_pred_entities(df: pd.DataFrame, file_col: str = "File",
     assert df_out.shape == df.shape
 
     return df_out
+
+def load_tree_hierarchical_module(df_reference: pd.DataFrame):
+    """
+    Construye un árbol jerárquico de códigos a partir de un DataFrame de referencia.
+
+    Parameters
+    ----------
+        `df_reference`: pd.DataFrame
+            - DataFrame con los códigos y descripciones de referencia. Debe contener las columnas **Código** y **Descripción**
+
+    Returns
+    -------
+        `node_dict`: dict
+            - Diccionario con todos los nodos del árbol jerárquico. Incluye el nodo raíz, los nodos por letra, los rangos, las hojas y los nodos sintéticos creados para subgrupos consecutivos
+    """
+    node_dict = {}
+
+    root = SoftmaxNode("Root", description="Root", alpha=10.0, gamma=2.0)
+    node_dict["root"] = root
+
+    # -------------------------
+    # CLEAN DATA
+    # -------------------------
+    rows = []
+    for _, row in tqdm(df_reference.iterrows(), total=len(df_reference)):
+        code = str(row["Código"]).strip().upper()
+
+        if "." in code:
+            continue
+
+        if is_valid(code):
+            rows.append({"code": code, "description": row["Descripción"]})
+
+    # -------------------------
+    # CREATE LETTER NODES
+    # -------------------------
+    letters = sorted(set(r["code"][0] for r in rows))
+    for letter in letters:
+        node_dict[letter] = SoftmaxNode(letter, parent=root, description=f"Chapter {letter}", alpha=5.0, gamma=2.0)
+
+    # -------------------------
+    # SPLIT TYPES
+    # -------------------------
+    ranges = []
+    leaves = []
+
+    for r in rows:
+        code = r["code"]
+
+        if "-" in code:
+            ranges.append(r)
+            if code not in node_dict:
+                node_dict[code] = SoftmaxNode(code, parent=None, description=r["description"], alpha=2.0, gamma=2.0)
+        else:
+            leaves.append(r)
+            if code not in node_dict:
+                node_dict[code] = SoftmaxNode(code, parent=None, description=r["description"])
+
+    # Agrupar por letra
+    groups = defaultdict(list)
+    for r in ranges:
+        letter, start_num, end_num = parse_range(r["code"])
+        groups[letter].append((r, start_num, end_num))
+
+    filtered_ranges = []
+
+    for letter, items in groups.items():
+        min_start = min(x[1] for x in items)
+        max_end = max(x[2] for x in items)
+
+        for r, start_num, end_num in items:
+            # Eliminamos SOLO el rango que cubre todo
+            if not (start_num == min_start and end_num == max_end):
+                filtered_ranges.append(r)
+
+    ranges = filtered_ranges
+
+    # -------------------------
+    # BUILD TREE
+    # -------------------------
+    range_codes = [r["code"] for r in ranges]
+    leaf_codes = [r["code"] for r in leaves]
+
+    # ---- 1. RANGE → RANGE
+    for child_code in range_codes:
+        possible_parents = []
+
+        for parent_code in range_codes:
+            if child_code == parent_code:
+                continue
+
+            if (is_code_in_range(child_code.split("-")[0], parent_code) and is_code_in_range(child_code.split("-")[1], parent_code)):
+                possible_parents.append(parent_code)
+
+        if possible_parents:
+            parent_code = min(possible_parents, key=lambda x: normalize_code(x.split("-")[1])[1] - normalize_code(x.split("-")[0])[1])
+            node_dict[child_code].parent = node_dict[parent_code]
+        else:
+            letter = child_code[0]
+            node_dict[child_code].parent = node_dict[letter]
+
+    # ---- 2. LEAF → RANGE
+    for leaf_code in leaf_codes:
+        possible_parents = []
+
+        for range_code in range_codes:
+            if is_code_in_range(leaf_code, range_code):
+                possible_parents.append(range_code)
+
+        if possible_parents:
+            parent_code = min(possible_parents, key=lambda x: normalize_code(x.split("-")[1])[1] - normalize_code(x.split("-")[0])[1])
+            node_dict[leaf_code].parent = node_dict[parent_code]
+        else:
+            letter = leaf_code[0]
+            node_dict[leaf_code].parent = node_dict[letter]
+
+    # -------------------------
+    # Rrefinar el árbol con subgrupos mínimos consecutivos
+    # -------------------------
+    add_min_consecutive_subgroups(node_dict)
+
+    return node_dict
+
+def construct_dataset_icd10(df: pd.DataFrame):
+    """
+    Construye los tensores de entrada y las queries para un dataset ICD-10, generando embeddings a partir del texto principal y de las descripciones asociadas.
+
+    Parameters
+    ----------
+        `df`: pd.DataFrame
+            - DataFrame con los datos de entrada. Debe contener las columnas **Text** y **All Description**
+
+    Returns
+    -------
+        `inputs`, `queries`: tuple
+            - Tupla formada por:
+                - `inputs`: tensor con los embeddings de los textos del DataFrame
+                - `queries`: lista de tensores con los embeddings de las descripciones asociadas a cada fila
+    """
+    inputs = embed_texts(df["Text"].tolist()).half()
+
+    all_descriptions = [d for row in df["All Description"] for d in row]
+    all_query_embeddings = embed_texts(all_descriptions).half()
+    queries = []
+    idx = 0
+    for desc_list in df["All Description"]:
+        q_len = len(desc_list)
+        queries.append(all_query_embeddings[idx:idx + q_len])
+        idx += q_len
+
+    return inputs, queries
+
+def construct_loaders_icd10(df: pd.DataFrame):
+    """
+    Crea un DataLoader para datos ICD-10 a partir de un DataFrame.
+
+    Parameters
+    ----------
+        `df`: pd.DataFrame
+            - DataFrame con los datos que se quieren convertir en dataset y loader. Debe contener las columnas necesarias para **construct_dataset_icd10**
+
+    Returns
+    -------
+        `data_loader`: DataLoader
+            - DataLoader construido a partir de `ICD10Dataset`, con batches de tamaño **1**, mezcla aleatoria y memoria fijada activada
+    """
+    inputs, queries = construct_dataset_icd10(df)
+    dataset = ICD10Dataset(inputs, queries)
+    data_loader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True)
+    return data_loader
+
+def run_icd10_hs_model(model: ICD10Predictor_HS_Head, predictor: ICD10Predictor_HS_CrossEntropyLoss, data_loader: DataLoader):
+    """
+    Ejecuta un modelo ICD-10 usando HierarchicalSoftmax y obtiene las predicciones para cada query del DataLoader.
+
+    Parameters
+    ----------
+        `model`: ICD10Predictor_NO_HS
+            - Modelo ICD-10 que recibe las queries como entrada y devuelve las puntuaciones de clasificación
+
+        `predictor`: ICD10Predictor_HS_CrossEntropyLoss
+            - Clase predictora que obtiene el valor final del diagnostico
+
+        `data_loader`: DataLoader
+            - DataLoader que proporciona batches con **inputs** y **queries**
+
+    Returns
+    -------
+        `all_pred`, `all_value_preds`: tuple
+            - Tupla formada por:
+                - `all_pred`: array con las clases predichas por el modelo.
+                - `all_value_preds`: array con las probabilidades predichas para cada clase.
+    """
+    dtype = next(model.parameters()).dtype
+    model.eval()
+
+    all_preds = []
+    all_value_preds = []
+
+    with torch.no_grad():
+
+        for inputs, queries in tqdm(data_loader, total=len(data_loader)):
+
+            inputs = inputs.to(device, dtype=dtype, non_blocking=True)
+            queries = queries.to(device, dtype=dtype, non_blocking=True)
+        
+            B, Q, _ = queries.shape
+            targets = targets.reshape(B * Q).long()
+            
+            outputs = model(queries)
+            outputs, path_results = predictor.predict(outputs)
+
+            all_preds.append(outputs)
+            all_value_preds.append((None,path_results))
+
+    all_preds = [x for sublist in all_preds for x in sublist]
+    all_value_preds = tensor_items_same_structure(all_value_preds)
+
+    return all_preds, all_value_preds
+
+def run_icd10_no_hs_model(model: ICD10Predictor_NO_HS, data_loader: DataLoader):
+    """
+    Ejecuta un modelo ICD-10 sin usar HierarchicalSoftmax y obtiene las predicciones para cada query del DataLoader.
+
+    Parameters
+    ----------
+        `model`: ICD10Predictor_NO_HS
+            - Modelo ICD-10 que recibe las queries como entrada y devuelve las puntuaciones de clasificación
+
+        `data_loader`: DataLoader
+            - DataLoader que proporciona batches con **inputs** y **queries**
+
+    Returns
+    -------
+        `all_pred`, `all_value_preds`: tuple
+            - Tupla formada por:
+                - `all_pred`: array con las clases predichas por el modelo.
+                - `all_value_preds`: array con las probabilidades predichas para cada clase.
+    """
+    dtype = next(model.parameters()).dtype
+    model.eval()
+
+    all_preds = []
+    all_value_preds = []
+
+    with torch.no_grad():
+
+        for inputs, queries in tqdm(data_loader, total=len(data_loader)):
+
+            inputs = inputs.to(device, dtype=dtype, non_blocking=True)
+            queries = queries.to(device, dtype=dtype, non_blocking=True)
+        
+            B, Q, _ = queries.shape
+            targets = targets.reshape(B * Q).long()
+            
+            outputs = model(queries)
+            all_preds.append(torch.argmax(outputs, dim=1).cpu().numpy())
+            max_vals, argmax_vals = torch.max(outputs, dim=1)
+
+            all_value_preds.append((None, [[(max_vals[i].item(), argmax_vals[i].item())] for i in range(outputs.size(0))]))
+            
+    all_pred = np.concatenate(all_pred)
+
+    return all_preds, all_value_preds
+
+def apply_thresholds_icd10(flattened_predictions: list, thresholds: list):
+    """
+    Aplica una lista de umbrales a secuencias de predicciones para determinar en qué paso debe detenerse cada secuencia.
+
+    Parameters
+    ----------
+        `flattened_predictions`: list
+            - Lista de secuencias de predicciones. Cada secuencia contiene los valores obtenidos en distintos pasos o niveles
+
+        `thresholds`: list
+            - Lista de umbrales que se comparan con los valores de cada secuencia. Cada posición representa el umbral correspondiente a ese paso
+
+    Returns
+    -------
+        `result`: list
+            - Lista de tuplas `(reached_end, stop_step, stop_value)`. `reached_end` indica si se ha llegado al final de su secuencia correctamente, `stop_step` indica el último paso aceptado antes de caer por debajo del umbral, y `stop_value` contiene el valor que provocó la parada o el último valor evaluado si no se detuvo antes.
+    """
+    result = []
+
+    for seq in flattened_predictions:
+        if len(seq) == 0:
+            result.append((False, None, None))
+            continue
+
+        max_steps = min(len(seq), len(thresholds))
+
+        stop_step = None
+        stop_value = None
+        reached_end = True
+
+        for step in range(max_steps):
+            value = seq[step]
+
+            if value < thresholds[step]:
+                stop_step = step - 1
+                stop_value = value
+                reached_end = False
+                break
+
+        if stop_step is None:
+            stop_step = max_steps - 1
+            stop_value = seq[stop_step]
+
+        result.append((reached_end, stop_step, stop_value))
+
+    return result
 
 def procesar_docx(informe_texto: str, report: Path, prompt: str, llm, json_parse: bool, docs_dir: Path):
     """

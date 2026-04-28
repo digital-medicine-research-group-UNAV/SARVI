@@ -9,8 +9,11 @@ from collections import defaultdict
 
 from ..models import PipelineContext, Any
 
-def read_checkpoint(ctx: PipelineContext) -> Any:
-    return torch.load(ctx.paths.docs_dir / "best_model_checkpoint.pt")
+def read_parquet_file(ctx: PipelineContext, name: str) -> Any:
+    return pd.read_parquet(ctx.paths.docs_dir / name)
+
+def read_torch_checkpoint(ctx: PipelineContext, name: str) -> Any:
+    return torch.load(ctx.paths.docs_dir / name)
 
 def cargar_docx_single(path: Path) -> str:
     """
