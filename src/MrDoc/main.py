@@ -8,11 +8,12 @@ import torch
 import asyncio
 import argparse
 import contextlib
-from .models import LLMConfig, PipelineContext
+from .models import LLMConfig, PipelineContext, DisabledOptionError
 from .config import paths
 from .logging_redirect import enable_stdout_logging
 from .core.create_jsons_per_llm_model import run_docx_to_jsons_sync, run_docx_to_jsons_async
 from .core.complete_excel_per_llm_model import run_jsons_to_xlsx_sync, run_jsons_to_xlsx_async
+
 
 def terminate_process(**kwargs) -> None:
     with contextlib.suppress(Exception):
@@ -25,6 +26,11 @@ def terminate_process(**kwargs) -> None:
 
 
 def run(ctx: PipelineContext, tarea: str, modo: str, folder_and_archive_name: str) -> None:
+    ############################################
+    if ctx.llm_config.lora_model != None:
+        raise DisabledOptionError("Actually disabled, please do not select any LoRA model")
+    ############################################
+
     signal.signal(signal.SIGINT, terminate_process)
 
     log_file = ctx.paths.logs_dir / f"{tarea}_{modo.upper()}_{folder_and_archive_name}.log"
