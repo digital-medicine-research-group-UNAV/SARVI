@@ -66,3 +66,4 @@ python -m src.MrDoc.main --tarea docx_to_jsons --cie_10_version 2026 --modo sync
 # **Warnings**
 
 - Although implemented, **--lora_model** is actually disabled and will return error
+- Although implemented, **--modo** will not work in **async** mode. It is actually disabled and will return error

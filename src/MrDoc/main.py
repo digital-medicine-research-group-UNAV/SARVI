@@ -29,6 +29,8 @@ def run(ctx: PipelineContext, tarea: str, modo: str, folder_and_archive_name: st
     ############################################
     if ctx.llm_config.lora_model != None:
         raise DisabledOptionError("Actually disabled, please do not select any LoRA model")
+    if modo == "async":
+        raise DisabledOptionError("Actually disabled, please do not run in async mode")
     ############################################
 
     signal.signal(signal.SIGINT, terminate_process)
