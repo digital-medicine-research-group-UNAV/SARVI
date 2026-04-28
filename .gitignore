@@ -19,3 +19,5 @@ __pycache__
 /notebooks/CodiEsp
 
 /src/MrDoc.egg-info
+
+/tmp/*
