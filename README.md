@@ -22,7 +22,7 @@ pip install -e .
 - **Package style** -> see `notebooks/package_functionality.ipynb`
 - **Command style** -> 
 ```bash
-python -m src.MrDoc.main --tarea docx_to_jsons --modo sync --llm_service vllm --llm_model openai/gpt-oss-20b --folder_and_archive_name Full_CUN_V0.1
+python -m src.MrDoc.main --tarea docx_to_jsons --cie_10_version 2026 --modo sync --llm_service vllm --llm_model openai/gpt-oss-20b --folder_and_archive_name Full_CUN_V0.1
 ```
 
 ## Minimum variables to stablish
