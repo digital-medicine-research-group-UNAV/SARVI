@@ -171,6 +171,7 @@ def main() -> None:
         num_interop_threads=args.num_interop_threads
     )
     ctx = PipelineContext(
+        ussage=args.ussage,
         folder_and_archive_name=args.folder_and_archive_name,
         json_parse=args.json_parse,
         llm_config=cfg_llm,
