@@ -7,6 +7,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from .common import (
     re,
+    np,
     pd,
     Any,
     tqdm,
@@ -15,8 +16,16 @@ from .common import (
     torch,
     cos_sim,
     SentenceTransformer,
+    SpanDataset,
+    SpanClassifier,
+    DataLoader,
     series_to_striding_ner_windows,
     average_overlapping_hidden_states_checked,
+    generate_sequences,
+    is_valid_decoder,
+    span_collate_fn,
+    normalize_list,
+    get_final_entity_components_from_group,
     validate_complete_objects_from_truncated_output,
     clean_objects_with_schema,
     clean_single_cie10_value,
@@ -91,6 +100,291 @@ def prepare_data(data: pd.DataFrame, padding: bool, tokenizer: Any, model: Any, 
         data_prepared.append(windows)
 
     return data_prepared
+
+def construct_dataset(data: list, tokenizer: Any, skip_incomplete_spans: bool = True):
+    """
+    Construye un dataset a partir de una lista de ventanas procesadas, generando secuencias de spans de tokens y asociándolas con sus embeddings correspondientes.
+
+    Parameters
+    ----------
+        `data`: list
+            - Lista con los datos de entrada ya preparados. Cada elemento contiene subinstancias con **input_ids**, embeddings y el nombre del archivo de origen
+
+        `tokenizer`: Any
+            - Tokenizer utilizado para generar secuencias de tokens, convertir IDs a tokens legibles y validar los spans generados
+
+        `skip_incomplete_spans`: bool
+            - Indica si se deben omitir spans incompletos o no válidos según **is_valid_decoder**. Por defecto es **True**
+
+    Returns
+    -------
+        ``: pd.DataFrame
+            - DataFrame construido a partir de los spans generados. Cada fila contiene el archivo de origen, los tokens del span, el span decodificado, el embedding del token ``CLS``, los embeddings del span, los índices tokens y la instancia de texto correspondiente
+    """
+    rows = []
+
+    for instance in tqdm(data):
+
+        for i,subinstance in enumerate(instance):
+
+            token_span_sequences = generate_sequences(tokenizer, subinstance["input_ids"], max_len=15)
+
+            for token_span in token_span_sequences:
+                if skip_incomplete_spans and not is_valid_decoder(tokenizer.convert_ids_to_tokens(token_span[1]), tokenizer.convert_ids_to_tokens(token_span[2]), tokenizer):
+                    continue
+                
+                decoded_span = tokenizer.convert_ids_to_tokens(token_span[1])
+
+                if (len(token_span[0]) == 1):
+                    subsequence = {"File": subinstance["file_name"], "Tokens": token_span[1], 
+                                "Decoded span": decoded_span,
+                                "CLS Embedding": subinstance["embedding"][0][0], 
+                                "Embeddings": subinstance["embedding"][0][token_span[0][0]],
+                                "Token idx": token_span[0], "Text instance": i}
+                else:
+                    subsequence = {"File": subinstance["file_name"], "Tokens": token_span[1], 
+                                "Decoded span": decoded_span,
+                                "CLS Embedding": subinstance["embedding"][0][0],  
+                                "Embeddings": subinstance["embedding"][0][token_span[0][0]:token_span[0][-1]],
+                                "Token idx": token_span[0], "Text instance": i}
+
+                rows.append(subsequence)
+    return pd.DataFrame(rows)
+
+def construct_loaders_ner(data: list, tokenizer: Any, skip_incomplete_spans: bool = True):
+    """
+    Construye el data loader para poder realizar la predicción de entidades.
+
+    Parameters
+    ----------
+        `data`: list
+            - Lista con los datos de entrada que se usarán para construir el dataset
+
+        `tokenizer`: Any
+            - Tokenizer utilizado por `construct_dataset` para procesar los datos y generar las representaciones necesarias
+
+        `skip_incomplete_spans`: bool
+            - Indica si se deben omitir spans incompletos durante la construcción del dataset. Por defecto es **True**
+
+    Returns
+    -------
+        `dataframe`, `data_loader`: tuple
+            - Tupla formada por:
+                - `dataframe`: DataFrame construido a partir de los datos de entrada
+                - `test_loader`: DataLoader que permite iterar sobre el dataset por lotes
+    """
+    dataframe = construct_dataset(data, tokenizer, skip_incomplete_spans=skip_incomplete_spans)
+
+    batch_size = 32
+
+    data_dataset = SpanDataset(dataframe)
+    data_loader = DataLoader(
+        data_dataset,
+        batch_size=batch_size,
+        collate_fn=span_collate_fn
+    )
+
+    return dataframe, data_loader
+
+def run_ner_model(model: SpanClassifier, data_loader: DataLoader, device: torch.device):
+    """
+    Ejecuta el model NER sobre un conjunto de datos y obtiene las etiquetas predichas y sus probabilidades
+
+    Parameters
+    ----------
+        `model`: SpanClassifier
+            - Modelo de clasificación de spans
+
+        `data_loader`: DataLoader
+            - DataLoader que proporciona los batches de datos
+
+        `device`: torch.device
+            - Dispositivo donde se ejecutará el modelo, por ejemplo **cpu** o **cuda**
+
+    Returns
+    -------
+        `all_true, all_pred, all_value_preds`: tuple
+            - Tupla formada por:
+                - `all_true`: array con las etiquetas reales.
+                - `all_pred`: array con las clases predichas por el modelo.
+                - `all_value_preds`: array con las probabilidades predichas para cada clase.
+    """
+    model.eval()
+
+    all_true = []
+    all_pred = []
+    all_value_preds = []
+
+    with torch.no_grad():
+        for batch in tqdm(data_loader):
+            span_repr, cls_repr, span_widths, labels = batch
+
+            span_repr = span_repr.to(device)
+            cls_repr = cls_repr.to(device)
+            span_widths = span_widths.to(device)
+            labels = labels.to(device)
+
+            logits = model(span_repr, cls_repr, span_widths)
+            value_preds = torch.softmax(logits, dim=-1)
+            preds = torch.argmax(value_preds, dim=-1)
+
+            all_true.append(labels.cpu().numpy())
+            all_pred.append(preds.cpu().numpy())
+            all_value_preds.append(value_preds.cpu().numpy())
+            
+    all_true = np.concatenate(all_true)
+    all_pred = np.concatenate(all_pred)
+    all_value_preds = np.concatenate(all_value_preds)
+
+    return all_true, all_pred, all_value_preds
+
+def update_df_with_final_pred_entities(df: pd.DataFrame, file_col: str = "File", token_idx_col: str = "Token idx", text_instance_col: str = "Text instance", label_col: str = "pred_label", id_col: str = "pred_id", outside_label: str = "O", outside_id: int = 2, fallback_when_final_span_missing: str = "max_existing"):
+    """
+    Actualiza un DataFrame de predicciones uniendo spans solapados o adyacentes que pertenecen a la misma entidad final.
+
+    Parameters
+    ----------
+        `df`: pd.DataFrame
+            - DataFrame original con las predicciones de spans. Debe contener columnas para archivo, instancia de texto, índices de tokens, etiqueta predicha e ID de predicción
+
+        `file_col`: str
+            - Nombre de la columna que identifica el archivo de origen. Por defecto es **File**
+
+        `token_idx_col`: str
+            - Nombre de la columna que contiene los índices de tokens del span. Por defecto es **Token idx**
+
+        `text_instance_col`: str
+            - Nombre de la columna que identifica la instancia de texto. Por defecto es **Text instance**
+
+        `label_col`: str
+            - Nombre de la columna que contiene la etiqueta predicha. Por defecto es **pred_label**
+
+        `id_col`: str
+            - Nombre de la columna que contiene el ID de la etiqueta predicha. Por defecto es **pred_id**
+
+        `outside_label`: str
+            - Etiqueta usada para marcar spans que no forman parte de ninguna entidad. Por defecto es **O**
+
+        `outside_id`: int
+            - ID asociado a la etiqueta **outside_label**. Por defecto es **2**
+
+        `fallback_when_final_span_missing`: str
+            - Estrategia a usar cuando el span final unido no existe como fila en el DataFrame. Puede ser **keep_original** para mantener las predicciones originales o **max_existing** para etiquetar el span existente más largo dentro del componente. Por defecto es **max_existing**
+
+    Returns
+    -------
+        `df_out`: pd.DataFrame
+            - Copia del DataFrame original con las columnas de predicción actualizadas. Mantiene exactamente las mismas filas, columnas, índice y forma que el DataFrame de entrada
+    """
+    if fallback_when_final_span_missing not in {"keep_original", "max_existing"}:
+        raise ValueError(
+            "fallback_when_final_span_missing must be 'keep_original' or 'max_existing'"
+        )
+
+    df_out = df.copy()
+
+    # Mapa label -> id usando las predicciones originales
+    label_to_id = (df[df[label_col] != outside_label].drop_duplicates(subset=[label_col]).set_index(label_col)[id_col].to_dict())
+
+    # Precalcular Token idx normalizado para buscar spans existentes
+    normalized_token_idx = {}
+
+    for idx, row in df.iterrows():
+        tok = normalize_list(row[token_idx_col])
+        tok = tuple(int(x) for x in tok)
+        normalized_token_idx[idx] = tok
+
+    ent_df = df[df[label_col] != outside_label].copy()
+
+    group_cols = [file_col, text_instance_col, label_col]
+
+    for (file_name, text_instance, entity_label), group in ent_df.groupby(group_cols, sort=False):
+        components = get_final_entity_components_from_group(group=group, token_idx_col=token_idx_col)
+
+        entity_id = label_to_id[entity_label]
+
+        for component in components:
+            source_indices = component["source_row_indices"]
+            final_token_idx = tuple(component["final_token_idx"])
+
+            # Si el componente tiene un solo span, no hay nada que juntar.
+            if len(source_indices) <= 1:
+                continue
+
+            # Buscar si el span final existe como fila en el df,
+            # independientemente de su predicción actual.
+            candidate_indices = []
+
+            mask_same_context = ((df[file_col] == file_name) & (df[text_instance_col] == text_instance))
+
+            for idx in df[mask_same_context].index:
+                if normalized_token_idx[idx] == final_token_idx:
+                    candidate_indices.append(idx)
+
+            if candidate_indices:
+                # Si existe el span final, usamos la primera fila que lo representa.
+                # Si tienes duplicados exactos, puedes cambiar esto para etiquetar todos.
+                final_row_idx = candidate_indices[0]
+
+                # Primero apagamos los spans previos del componente.
+                for idx in source_indices:
+                    if idx != final_row_idx:
+                        df_out.at[idx, label_col] = outside_label
+                        df_out.at[idx, id_col] = outside_id
+
+                # Luego activamos el span final.
+                df_out.at[final_row_idx, label_col] = entity_label
+                df_out.at[final_row_idx, id_col] = entity_id
+
+            else:
+                if fallback_when_final_span_missing == "keep_original":
+                    # Muy importante:
+                    # Si el span final no existe en el df, no borramos nada.
+                    continue
+
+                if fallback_when_final_span_missing == "max_existing":
+                    best_idx = None
+                    best_len = 0
+
+                    final_set = set(final_token_idx)
+
+                    for idx in df[mask_same_context].index:
+                        row_token_idx = normalized_token_idx[idx]
+                        row_set = set(row_token_idx)
+
+                        if not row_set:
+                            continue
+
+                        # Queremos un span existente dentro del rango final.
+                        if row_set.issubset(final_set):
+                            if len(row_set) > best_len:
+                                best_idx = idx
+                                best_len = len(row_set)
+
+                    if best_idx is None:
+                        continue
+
+                    # Solo hacemos algo si la mejor combinación existente
+                    # es mayor que los spans originales individuales.
+                    max_source_len = max(len(normalized_token_idx[idx]) for idx in source_indices)
+
+                    if best_len <= max_source_len:
+                        continue
+
+                    for idx in source_indices:
+                        if idx != best_idx:
+                            df_out.at[idx, label_col] = outside_label
+                            df_out.at[idx, id_col] = outside_id
+
+                    df_out.at[best_idx, label_col] = entity_label
+                    df_out.at[best_idx, id_col] = entity_id
+
+    # Garantía fuerte: mismas filas y mismas columnas
+    assert list(df_out.columns) == list(df.columns)
+    assert list(df_out.index) == list(df.index)
+    assert df_out.shape == df.shape
+
+    return df_out
 
 def procesar_docx(informe_texto: str, report: Path, prompt: str, llm, json_parse: bool, docs_dir: Path):
     """
