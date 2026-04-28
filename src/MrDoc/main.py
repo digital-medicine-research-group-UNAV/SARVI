@@ -11,7 +11,7 @@ import contextlib
 from .models import LLMConfig, PipelineContext, DisabledOptionError
 from .config import paths
 from .logging_redirect import enable_stdout_logging
-from .core.create_jsons_per_llm_model import run_docx_to_jsons_sync, run_docx_to_jsons_async
+from .core.create_jsons_per_llm_model import run_docx_to_jsons_deterministic_sync, run_docx_to_jsons_genrative_sync, run_docx_to_jsons_deterministic_async, run_docx_to_jsons_genrative_async
 from .core.complete_excel_per_llm_model import run_jsons_to_xlsx_sync, run_jsons_to_xlsx_async
 
 
@@ -25,7 +25,7 @@ def terminate_process(**kwargs) -> None:
     os.kill(os.getpid(), signal.SIGTERM)
 
 
-def run(ctx: PipelineContext, tarea: str, modo: str, folder_and_archive_name: str) -> None:
+def run(ctx: PipelineContext, tarea: str, ussage: str, modo: str, folder_and_archive_name: str) -> None:
     ############################################
     if ctx.llm_config.lora_model != None:
         raise DisabledOptionError("Actually disabled, please do not select any LoRA model")
@@ -42,9 +42,15 @@ def run(ctx: PipelineContext, tarea: str, modo: str, folder_and_archive_name: st
 
     if tarea == "docx_to_jsons":
         if modo == "sync":
-            run_docx_to_jsons_sync(ctx)
+            if ussage == "determenistic":
+                run_docx_to_jsons_deterministic_sync(ctx)
+            else:
+                run_docx_to_jsons_genrative_sync(ctx)
         else:
-            asyncio.run(run_docx_to_jsons_async(ctx))
+            if ussage == "determenistic":
+                run_docx_to_jsons_deterministic_async(ctx)
+            else:
+                asyncio.run(run_docx_to_jsons_genrative_async(ctx))
 
     elif tarea == "jsons_to_xlsx":
         if modo == "sync":
@@ -74,6 +80,14 @@ def main() -> None:
         required=True,
         choices=["2018", "2024", "2026"],
         help="Seleccionar el año de versión de los códigos CIE10"
+    )
+
+    parser.add_argument(
+        "--ussage",
+        type=str,
+        required=True,
+        choices=["deterministic", "generative"],
+        help="Selecciona que tipo de modo quieres usar para ejecutar la tarea. SOLAMENTE TENDRÁ USO EN LA TAREA `docx_to_jsons`"
     )
 
     parser.add_argument(
@@ -165,7 +179,7 @@ def main() -> None:
         cie_10_version=args.cie_10_version
     )
 
-    run(ctx, args.tarea, args.modo, args.folder_and_archive_name)
+    run(ctx, args.tarea, args.ussage, args.modo, args.folder_and_archive_name)
 
 if __name__ == "__main__":
     main()

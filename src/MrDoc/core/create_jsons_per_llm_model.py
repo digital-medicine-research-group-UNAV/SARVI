@@ -45,8 +45,11 @@ def initialize_variables(ctx: PipelineContext):
 
     return config
 
+def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
+    pass
 
-def run_docx_to_jsons_sync(ctx: PipelineContext):
+
+def run_docx_to_jsons_genrative_sync(ctx: PipelineContext):
     config = initialize_variables(ctx)
 
     for report in tqdm(config.report_list, desc="Extrayendo CIE10 de archivos...", unit="informe"):
@@ -65,7 +68,10 @@ def run_docx_to_jsons_sync(ctx: PipelineContext):
                 else:
                     print(f"❌ Falló definitivamente el informe: {report}\n")
 
-async def run_docx_to_jsons_async(ctx: PipelineContext):
+def run_docx_to_jsons_deterministic_async(ctx: PipelineContext):
+    pass
+
+async def run_docx_to_jsons_genrative_async(ctx: PipelineContext):
     config = initialize_variables(ctx)
 
     async def procesar_con_reintentos(report, max_retries=5):
