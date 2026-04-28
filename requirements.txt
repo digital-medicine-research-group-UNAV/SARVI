@@ -124,8 +124,10 @@ spacy-loggers==1.0.5
 SQLAlchemy==2.0.44
 srsly==2.5.2
 stack-data==0.6.3
+stop-words==2025.11.4
 sympy==1.14.0
 tenacity==9.1.2
+text2num==3.0.1
 thinc==8.3.10
 threadpoolctl==3.6.0
 tiktoken==0.12.0
