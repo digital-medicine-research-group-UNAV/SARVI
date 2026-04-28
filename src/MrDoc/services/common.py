@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.express as px
 from pathlib import Path
 from tqdm.auto import tqdm
+import xml.etree.ElementTree as ET
 from IPython.display import HTML, display
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
@@ -15,6 +16,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from ..io.reader import load_schema_info
 from ..config import BASE_DIR
+from ..models import Any
 
 ###
 with open(BASE_DIR / "docs" / "prompts.yml", 'r', encoding='utf-8') as file:
@@ -657,3 +659,210 @@ def plot_true_evolution(df: pd.DataFrame, title: str = None):
     fig.update_layout(template="plotly_white", title_x=0.5)
 
     fig.show()
+
+def average_overlapping_hidden_states_checked(windows: list[dict[str, Any]], last_hidden_state_list: list[torch.Tensor], *, window_tokens_no_special: int, stride: int, strict: bool = True) -> tuple[list[torch.Tensor], list[str]]:
+    """
+    Solapa los estados ocultos de los tokens solapados entre ventanas consecutivas, comprobando que las dimensiones, máscaras y parámetros sean coherentes.
+
+    Parameters
+    ----------
+        `windows`: list[dict[str, Any]]
+            - Lista de ventanas generadas previamente. Cada ventana debe contener, al menos, la clave `attention_mask` para identificar los tokens reales
+
+        `last_hidden_state_list`: list[torch.Tensor]
+            - Lista de tensores con los estados ocultos generados por el modelo para cada ventana. Cada tensor debe tener forma **(1, seq_len, hidden_dim)**
+
+        `window_tokens_no_special`: int
+            - Número máximo de tokens reales por ventana, sin contar tokens especiales como `CLS` y `SEP`
+
+        `stride`: int
+            - Desplazamiento entre ventanas consecutivas. Se usa junto con `window_tokens_no_special` para calcular el solapamiento.
+
+        `strict`: bool
+            - Si es **True**, lanza errores cuando detecta inconsistencias en los datos, dimensiones o solapamientos. Si es **False**, registra advertencias en **logs** y continúa cuando sea posible. Por defecto es **True**.
+
+    Returns
+    -------
+        out, logs: tuple[list[torch.Tensor], list[str]]
+            - Tupla formada por:
+            
+                - `out`: lista de tensores con los estados ocultos actualizados, donde los tokens solapados entre ventanas han sido promediados.
+                - `logs`: lista de mensajes informativos o advertencias sobre el proceso.
+    """
+
+    logs = []
+
+    if len(windows) != len(last_hidden_state_list):
+        raise ValueError("windows y last_hidden_state_list deben tener la misma longitud")
+
+    if window_tokens_no_special <= 0:
+        raise ValueError("window_tokens_no_special debe ser > 0")
+    if stride <= 0:
+        raise ValueError("stride debe ser > 0")
+
+    overlap = window_tokens_no_special - stride
+    if overlap < 0:
+        msg = f"overlap negativo: window_tokens_no_special({window_tokens_no_special}) - stride({stride}) = {overlap}"
+        if strict:
+            raise ValueError(msg)
+        logs.append("WARNING: " + msg)
+        # sin solape útil
+        return [h.clone() for h in last_hidden_state_list], logs
+
+    out = [h.clone() for h in last_hidden_state_list]
+
+    for i in range(len(out) - 1):
+        h_i = out[i]      # (1, Li, H)
+        h_j = out[i + 1]  # (1, Lj, H)
+
+        if h_i.dim() != 3 or h_j.dim() != 3 or h_i.size(0) != 1 or h_j.size(0) != 1:
+            msg = f"Ventanas deben ser (1, seq_len, hidden_dim). Got {tuple(h_i.shape)} and {tuple(h_j.shape)} at i={i}"
+            if strict:
+                raise ValueError(msg)
+            logs.append("WARNING: " + msg)
+            continue
+
+        Li = h_i.shape[1]
+        Lj = h_j.shape[1]
+
+        mask_i = torch.tensor(windows[i]["attention_mask"])
+        mask_j = torch.tensor(windows[i + 1]["attention_mask"])
+
+        # contar solo tokens activos
+        real_i = int(mask_i.sum().item()) - 2  # quitamos CLS y SEP
+        real_j = int(mask_j.sum().item()) - 2
+
+        if strict:
+            if real_i <= 0:
+                raise ValueError(f"Ventana {i} no tiene tokens reales: seq_len={Li}")
+            if real_j <= 0:
+                raise ValueError(f"Ventana {i+1} no tiene tokens reales: seq_len={Lj}")
+        else:
+            if real_i <= 0 or real_j <= 0:
+                logs.append(f"WARNING: ventana {i} o {i+1} sin tokens reales (Li={Li}, Lj={Lj}). Se omite.")
+                continue
+
+        # Si overlap == 0 no hay nada que promediar
+        if overlap == 0:
+            logs.append("INFO: overlap=0, no se promedia nada.")
+            return out, logs
+
+        # solape efectivo (la última ventana puede ser corta)
+        ov = min(overlap, real_i, real_j)
+        if ov <= 0:
+            msg = f"Sin solape efectivo en par (i={i}, i+1={i+1}): overlap={overlap}, real_i={real_i}, real_j={real_j}"
+            if strict:
+                raise ValueError(msg)
+            logs.append("WARNING: " + msg)
+            continue
+
+        # Sanity check: si no es la última ventana, normalmente real_i debería ser == window_tokens_no_special
+        # (excepto quizá la última).
+        if strict and i < len(out) - 2:
+            # esta condición depende de cómo generaste las ventanas; si tu extractor puede cortar antes,
+            # pon strict=False.
+            if real_i != window_tokens_no_special:
+                raise ValueError(
+                    f"Ventana {i} tiene {real_i} tokens reales, esperado {window_tokens_no_special}. "
+                    "Si tu extractor produce ventanas más cortas, usa strict=False."
+                )
+
+        # indices dentro del tensor (saltando specials):
+        # reales de i: [1 .. 1+real_i)
+        # últimos ov reales:
+        i_start = 1 + (real_i - ov)
+        i_end   = 1 + real_i
+
+        # reales de j: [1 .. 1+real_j)
+        # primeros ov reales:
+        j_start = 1
+        j_end   = 1 + ov
+
+        # Promedio simétrico
+        avg = 0.5 * (h_i[:, i_start:i_end, :] + h_j[:, j_start:j_end, :])
+
+        h_i[:, i_start:i_end, :] = avg
+        h_j[:, j_start:j_end, :] = avg
+
+        logs.append(
+            f"OK pair {i}-{i+1}: ov={ov} | "
+            f"i[{i_start}:{i_end}] <-> j[{j_start}:{j_end}] | "
+            f"shapes Li={Li}, Lj={Lj}"
+        )
+
+    return out, logs
+
+def series_to_striding_ner_windows(serie, tokenizer: Any, *, window_tokens: int = 512, stride: int = 128, padding: bool = False) -> list[dict[str, Any]]:
+    """
+    Divide el texto de una serie en ventanas de tokens con solapamiento, usando stride, y tokeniza cada ventana para preparar entradas compatibles con el modelo.
+
+    Parameters
+    ----------
+        `serie`: pd.Series
+            - Fila o serie que contiene el texto a procesar. Debe incluir la clave `Text` con el contenido completo del documento
+
+        `tokenizer`: Any
+            - Tokenizer utilizado para convertir el texto en tokens, obtener los `input_ids`, las máscaras de atención y los offsets de caracteres
+
+        `window_tokens`: int
+            - Número máximo de tokens por ventana, sin contar tokens especiales. Por defecto es **512**
+
+        `stride`: int
+            - Número de tokens de solapamiento entre ventanas consecutivas. Por defecto es **128**
+
+        `padding`: bool
+            - Indica si se debe aplicar padding hasta la longitud máxima `window_tokens + 2` para incluir tokens especiales. Por defecto es **False**.
+
+    Returns
+    -------
+        `windows`: list[dict[str, Any]]
+            - Lista de diccionarios, donde cada diccionario representa una ventana del texto. Cada ventana incluye su índice, posiciones de caracteres, texto, **input_ids**, **attention_mask** y **offset_mapping**
+    """
+    text = serie["Text"]
+
+    # Tokenize full doc no special tokens
+    enc_full = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True, truncation=False)
+    full_ids = enc_full["input_ids"]
+    full_offsets = enc_full["offset_mapping"]
+    if not full_ids:
+        return []
+
+    step = window_tokens - stride
+    if step <= 0:
+        raise ValueError("Invalid stride/window size")
+
+    windows = []
+    token_start = 0
+    widx = 0
+
+    while token_start < len(full_ids):
+        token_end = min(token_start + window_tokens, len(full_ids))
+        win_char_start = full_offsets[token_start][0]
+        win_char_end = full_offsets[token_end - 1][1]
+        win_text = text[win_char_start:win_char_end]
+
+        # Original token slice
+        win_ids_slice = full_ids[token_start:token_end]
+        win_offsets_slice = full_offsets[token_start:token_end]
+
+        # Prepare tokenized window WITH specials
+        if padding:
+            retok = tokenizer(win_text, truncation=True, padding="max_length", max_length=window_tokens + 2, return_offsets_mapping=True)
+        else:
+            retok = tokenizer(win_text, truncation=True, padding=False, return_offsets_mapping=True)
+
+        # Now align original token mapping to retokenized
+        # Build map: char -> retokenized token index
+        tok_char_to_new_idx = {}
+        for idx, (s_off, e_off) in enumerate(retok["offset_mapping"]):
+            for cpos in range(s_off, e_off):
+                tok_char_to_new_idx[cpos] = idx
+
+        windows.append({"window_index": widx, "char_start": win_char_start, "char_end": win_char_end, "text": win_text, "input_ids": retok["input_ids"], "attention_mask": retok["attention_mask"], "offset_mapping": retok["offset_mapping"]})
+
+        if token_end == len(full_ids):
+            break
+        token_start += step
+        widx += 1
+
+    return windows
