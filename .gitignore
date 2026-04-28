@@ -17,6 +17,8 @@ __pycache__
 !/logs/.gitkeep
 
 /notebooks/CodiEsp
+/notebooks/FT*
+/notebooks/Perceiver
 
 /src/MrDoc.egg-info
 
