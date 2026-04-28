@@ -8,7 +8,8 @@ from ..models import (
 
 from ..io.reader import (
     textwrap,
-    cargar_docx_single
+    cargar_docx_single,
+    cargar_docx_lista
 )
 from ..io.writing import (
     create_intermediate_folder_name,
@@ -18,6 +19,7 @@ from ..io.writing import (
 from ..services.llm_loader import load_llm
 from ..services.common import (
     tqdm,
+    pd,
     prompts as prompts_total
 )
 from ..services.sync_funcs import (
@@ -32,8 +34,14 @@ def initialize_variables(ctx: PipelineContext):
     create_intermediate_folder_name(ctx)
 
     report_list = natsorted(p for p in (ctx.paths.data_input / ctx.folder_and_archive_name).iterdir() if p.is_file())
-    prompt = textwrap.dedent(prompts_total["report_to_data"])
-    llm = load_llm(ctx.llm_config)
+    
+    if ctx.ussage == "generative":
+        llm = load_llm(ctx.llm_config)
+        prompt = textwrap.dedent(prompts_total["report_to_data"])
+    else:
+        llm = None
+        prompt = None
+    
     semaforo = asyncio.Semaphore(ctx.MAX_CONCURRENCY)
 
     config = DOCXToJSONSConfig(
@@ -46,8 +54,11 @@ def initialize_variables(ctx: PipelineContext):
     return config
 
 def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
-    pass
+    config = initialize_variables(ctx)
 
+    dict_data = cargar_docx_lista(ctx.paths.data_input / ctx.folder_and_archive_name)
+    df_data = pd.DataFrame(list(dict_data.items()), columns=["archivo_origen", "Text"])
+    pass
 
 def run_docx_to_jsons_genrative_sync(ctx: PipelineContext):
     config = initialize_variables(ctx)
@@ -69,6 +80,7 @@ def run_docx_to_jsons_genrative_sync(ctx: PipelineContext):
                     print(f"❌ Falló definitivamente el informe: {report}\n")
 
 def run_docx_to_jsons_deterministic_async(ctx: PipelineContext):
+    config = initialize_variables(ctx)
     pass
 
 async def run_docx_to_jsons_genrative_async(ctx: PipelineContext):

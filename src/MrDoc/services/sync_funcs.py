@@ -8,12 +8,15 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from .common import (
     re,
     pd,
+    Any,
     tqdm,
     Path,
     json,
     torch,
     cos_sim,
     SentenceTransformer,
+    series_to_striding_ner_windows,
+    average_overlapping_hidden_states_checked,
     validate_complete_objects_from_truncated_output,
     clean_objects_with_schema,
     clean_single_cie10_value,
@@ -23,6 +26,71 @@ from .common import (
     cie10_judger_model,
     device
 )
+
+def prepare_data(data: pd.DataFrame, padding: bool, tokenizer: Any, model: Any, device: torch.device, window_tokens_no_special: int = 510, stride: int = 128, strict: bool = False):
+    """
+    Prepara el conjunto de datos a utilizar de manera determinista para la extracción de entidades. 
+    Genera ventanas con stride, calculando los embeddings de cada ventana con el modelo y fusionando los estados ocultos solapados.
+
+    Parameters
+    ----------
+        `data`: pd.DataFrame
+            - DataFrame con los datos de entrada. Debe contar unicamente con las columnas `archivo_origen` y `Text`
+
+        `padding`: bool
+            - Indica si se debe aplicar padding a las ventanas generadas por el tokenizer
+
+        `tokenizer`: Any
+            - Tokenizer utilizado para transformar el texto en tokens y para generar las ventanas de entrada del modelo
+
+        `model`: Any
+            - Modelo utilizado para calcular los estados ocultos de cada ventana
+
+        `device`: torch.device
+            - Dispositivo donde se ejecutará el modelo, por ejemplo **cpu** o **cuda**
+
+        `window_tokens_no_special`: int
+            - Número máximo de tokens por ventana sin contar tokens especiales. Por defecto es **510** *(512-2 tokens especiales)*.
+
+        `stride`: int
+            - Número de tokens de solapamiento o desplazamiento entre ventanas consecutivas. Por defecto es **128*.
+
+        `strict`: bool
+            - Si es `True`, aplica comprobaciones estrictas al fusionar los estados ocultos solapados. Por defecto es **False**.
+
+    Returns
+    -------
+        ``: list
+            - Lista con las ventanas preparadas para cada fila del DataFrame. Cada ventana incluye su embedding calculado y el nombre del archivo de origen.
+    """
+    iterator = data.iterrows()
+    
+    data_prepared = []
+
+    for i, info in tqdm(iterator, total=len(data)):
+        windows = series_to_striding_ner_windows(info, tokenizer=tokenizer, window_tokens=window_tokens_no_special, stride=stride, padding=padding)
+
+        last_hidden_state_list = []
+        for w in windows:
+            inputs = {
+                "input_ids": torch.tensor([w["input_ids"]], device=device),
+                "attention_mask": torch.tensor([w["attention_mask"]], device=device),
+            }
+            with torch.no_grad():
+                outputs = model(**inputs)
+
+            last_hidden_states = outputs.last_hidden_state
+            last_hidden_state_list.append(last_hidden_states)
+            
+        merged, logs = average_overlapping_hidden_states_checked(windows=windows, last_hidden_state_list=last_hidden_state_list, tokenizer=tokenizer, window_tokens_no_special=window_tokens_no_special, stride=stride, strict=strict)
+
+        for w,m in zip(windows, merged):
+            w["embedding"] = m
+            w["file_name"] = info["archivo_origen"]
+
+        data_prepared.append(windows)
+
+    return data_prepared
 
 def procesar_docx(informe_texto: str, report: Path, prompt: str, llm, json_parse: bool, docs_dir: Path):
     """
