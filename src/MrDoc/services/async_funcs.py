@@ -149,7 +149,8 @@ async def seleccionar_CIE10_lista(enfermedad: str, CIE10_dict: dict, prompt: str
     return answer
 
 
-async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_extraido: str, contexto: str, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
+# async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_extraido: str, contexto: str, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
+async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_extraido: str, prompt: str, docs_dir: Path, json_parse: bool = False) -> dict:
     """
     💸💸💸
 
@@ -196,7 +197,7 @@ async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_e
     prompt = f"[REF]{diagnostico_extraido.lower()}[CODE]{CIE10_codigo.upper()}[DESC]{CIE10_descripción.lower()}"
     inputs = cie10_judger_tokenizer(prompt, return_tensors="pt", truncation=True, padding="max_length", max_length=256).to(device)
     with torch.no_grad():
-        outputs = cie10_judger_model(**inputs, disable_tqdm=True)
+        outputs = cie10_judger_model(**inputs)
         logits = outputs.logits
         prediction = logits.argmax(dim=-1).item()
 
@@ -510,7 +511,8 @@ async def asistente_juzgador_cie10(df_final: pd.DataFrame, prompt_CIE10_juzgador
             async with semaforo:
                 for attempt in range(1, max_retries + 1):
                     try:
-                        raw_result = await juzgar_CIE10(row[f"CIE10_selected{sufijo}"], row[f"diagnostico_selected{sufijo}"], row["diagnostico_predicted"], contexts[row["nombre_archivo"]], prompt_CIE10_juzgador, llm, docs_dir, json_parse)
+                        # raw_result = await juzgar_CIE10(row[f"CIE10_selected{sufijo}"], row[f"diagnostico_selected{sufijo}"], row["diagnostico_predicted"], contexts[row["nombre_archivo"]], prompt_CIE10_juzgador, llm, docs_dir, json_parse)
+                        raw_result = await juzgar_CIE10(row[f"CIE10_selected{sufijo}"], row[f"diagnostico_selected{sufijo}"], row["diagnostico_predicted"], prompt_CIE10_juzgador, docs_dir, json_parse)
                         if not validate_json_created(raw_result, docs_dir / "esquema_juzgar.json"):
                             raise Exception(f"El JSON creado del documento para la fila {idx} no sigue el esquema indicado")
                         result = raw_result["resultado"]
