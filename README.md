@@ -62,3 +62,7 @@ python -m src.MrDoc.main --tarea docx_to_jsons --cie_10_version 2026 --modo sync
     - GPT-oss *(vLLM)* - `openai/gpt-oss-20b`
 
 > Other models or exchanges between ASYNC and SYNC are NOT TESTED
+
+# **Warnings**
+
+- Although implemented, **--lora_model** is actually disabled and will return error

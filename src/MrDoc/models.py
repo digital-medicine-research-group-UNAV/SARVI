@@ -7,6 +7,9 @@ from typing import Any
 
 from .config import AppPaths
 
+class DisabledOptionError(Exception):
+    pass
+
 class LLMConfig(BaseModel):
     service: str
     model: str
