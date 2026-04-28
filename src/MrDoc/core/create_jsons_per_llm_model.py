@@ -20,10 +20,14 @@ from ..services.llm_loader import load_llm
 from ..services.common import (
     tqdm,
     pd,
+    device,
+    tokenizer_ner,
+    model_ner,
     prompts as prompts_total
 )
 from ..services.sync_funcs import (
-    procesar_docx as procesar_docx_SYNC
+    procesar_docx as procesar_docx_SYNC,
+    prepare_data as prepare_data_SYNC
 )
 from ..services.async_funcs import (
     asyncio,
@@ -58,6 +62,7 @@ def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
 
     dict_data = cargar_docx_lista(ctx.paths.data_input / ctx.folder_and_archive_name)
     df_data = pd.DataFrame(list(dict_data.items()), columns=["archivo_origen", "Text"])
+    df_data = prepare_data_SYNC(df_data, padding=False, tokenizer=tokenizer_ner, model=model_ner, data_files_type="span", device=device)
     pass
 
 def run_docx_to_jsons_genrative_sync(ctx: PipelineContext):

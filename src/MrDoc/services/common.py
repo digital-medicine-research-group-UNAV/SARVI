@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 from sentence_transformers.util import cos_sim
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 
 from ..io.reader import load_schema_info
 from ..config import BASE_DIR
@@ -30,6 +30,9 @@ model = SentenceTransformer('all-MiniLM-L6-v2')
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 cie10_judger_tokenizer = AutoTokenizer.from_pretrained("JulenRM/RigoBERTa-Clinical_CIE10Judger")
 cie10_judger_model = AutoModelForSequenceClassification.from_pretrained("JulenRM/RigoBERTa-Clinical_CIE10Judger").to(device)
+
+tokenizer_ner = AutoTokenizer.from_pretrained("IIC/RigoBERTa-Clinical", trim_offsets=False, use_fast=True)
+model_ner = AutoModel.from_pretrained("IIC/RigoBERTa-Clinical").to(device)
 ###
 
 def procesar_json_diagnosticos(data: dict[str, dict]) -> pd.DataFrame:
