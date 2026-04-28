@@ -10,6 +10,14 @@ from .config import AppPaths
 class DisabledOptionError(Exception):
     pass
 
+class Span(BaseModel):
+    start: int
+    end: int
+
+    model_config = {
+        "arbitrary_types_allowed": True
+    }
+
 class LLMConfig(BaseModel):
     service: str
     model: str
@@ -43,6 +51,7 @@ class JSONToXLSXConfig(BaseModel):
 
 class PipelineContext(BaseModel):
     paths: AppPaths
+    ussage: str
 
     # MUTABLES
     folder_and_archive_name: str
