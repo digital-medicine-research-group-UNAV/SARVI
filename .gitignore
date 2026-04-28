@@ -4,6 +4,7 @@ __pycache__
 *.pyd
 *.env
 *.pt
+*.parquet
 *.venv*
 
 /data/input/*
