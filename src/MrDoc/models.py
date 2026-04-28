@@ -10,6 +10,7 @@ from .config import AppPaths
 class LLMConfig(BaseModel):
     service: str
     model: str
+    lora_model: str|None = None
     device: str
     num_threads: int = 16
     num_interop_threads: int = 2
@@ -44,6 +45,7 @@ class PipelineContext(BaseModel):
     folder_and_archive_name: str
     json_parse: bool = True
     llm_config: LLMConfig
+    cie_10_version: str
     
     # MUTABLES (async ONLY)
     MAX_CONCURRENCY: int = 5
