@@ -16,7 +16,7 @@ def write_json(ctx: PipelineContext, report: Path, texto: dict):
         json.dump(texto, f, ensure_ascii=False, indent=4)
 
 def write_excel_log(df: pd.DataFrame, ctx: PipelineContext, i: int):
-    df.to_excel(f"{ctx.paths.data_output}/{ctx.folder_and_archive_name}_logs/df_{ctx.folder_and_archive_name}_{i}.xlsx", index=False)
+    df.to_excel(f"{ctx.paths.data_output}/{ctx.folder_and_archive_name}_logs/df_{i}.xlsx", index=False)
 
 def write_excel_final(df: pd.DataFrame, ctx: PipelineContext):
-    df.to_excel(f"{ctx.paths.data_output}/df_{ctx.folder_and_archive_name}_FINAL.xlsx", index=False)
+    df.to_excel(f"{ctx.paths.data_output}/{ctx.folder_and_archive_name}_FINAL.xlsx", index=False)
