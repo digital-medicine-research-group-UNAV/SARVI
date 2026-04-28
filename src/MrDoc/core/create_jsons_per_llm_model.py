@@ -23,11 +23,16 @@ from ..services.common import (
     device,
     tokenizer_ner,
     model_ner,
+    initialize_span_ner_model,
+    id2label,
     prompts as prompts_total
 )
 from ..services.sync_funcs import (
     procesar_docx as procesar_docx_SYNC,
-    prepare_data as prepare_data_SYNC
+    prepare_data as prepare_data_SYNC,
+    construct_loaders_ner as construct_loaders_ner_SYNC,
+    run_ner_model as run_ner_model_SYNC,
+    update_df_with_final_pred_entities as update_df_with_final_pred_entities_SYNC
 )
 from ..services.async_funcs import (
     asyncio,
@@ -42,9 +47,11 @@ def initialize_variables(ctx: PipelineContext):
     if ctx.ussage == "generative":
         llm = load_llm(ctx.llm_config)
         prompt = textwrap.dedent(prompts_total["report_to_data"])
+        modelo = None
     else:
         llm = None
         prompt = None
+        modelo = initialize_span_ner_model(ctx)
     
     semaforo = asyncio.Semaphore(ctx.MAX_CONCURRENCY)
 
@@ -52,7 +59,8 @@ def initialize_variables(ctx: PipelineContext):
         report_list=report_list,
         prompt=prompt,
         llm=llm,
-        semaforo=semaforo
+        semaforo=semaforo,
+        modelo=modelo
     )
 
     return config
@@ -60,10 +68,20 @@ def initialize_variables(ctx: PipelineContext):
 def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
     config = initialize_variables(ctx)
 
+    # ------------------------------NER------------------------------
     dict_data = cargar_docx_lista(ctx.paths.data_input / ctx.folder_and_archive_name)
     df_data = pd.DataFrame(list(dict_data.items()), columns=["archivo_origen", "Text"])
+
     df_data = prepare_data_SYNC(df_data, padding=False, tokenizer=tokenizer_ner, model=model_ner, data_files_type="span", device=device)
-    pass
+    df_data, data_loader = construct_loaders_ner_SYNC(data=df_data, tokenizer=tokenizer_ner)
+    all_true, all_pred, all_value_preds = run_ner_model_SYNC(config.modelo, data_loader=data_loader, device=device)
+    
+    df_data["pred_id"] = all_pred
+    df_data["pred_label"] = df_data["pred_id"].map(id2label)
+    df_data = update_df_with_final_pred_entities_SYNC(df_data)
+
+    # ------------------------------CIE10------------------------------
+    
 
 def run_docx_to_jsons_genrative_sync(ctx: PipelineContext):
     config = initialize_variables(ctx)
@@ -84,7 +102,7 @@ def run_docx_to_jsons_genrative_sync(ctx: PipelineContext):
                 else:
                     print(f"❌ Falló definitivamente el informe: {report}\n")
 
-def run_docx_to_jsons_deterministic_async(ctx: PipelineContext):
+async def run_docx_to_jsons_deterministic_async(ctx: PipelineContext):
     config = initialize_variables(ctx)
     pass
 

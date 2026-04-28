@@ -7,7 +7,10 @@ from docx import Document
 from tqdm.auto import tqdm
 from collections import defaultdict
 
-from ..models import PipelineContext
+from ..models import PipelineContext, Any
+
+def read_checkpoint(ctx: PipelineContext) -> Any:
+    return torch.load(ctx.paths.docs_dir / "best_model_checkpoint.pt")
 
 def cargar_docx_single(path: Path) -> str:
     """
