@@ -48,12 +48,20 @@ def initialize_variables(ctx: PipelineContext):
     
     #################################################################################################################
 
-    df_reference = read_excel(ctx, "Diagnosticos_ES2024.xlsx", sheet_name="ES2024 Completa + Marcadores", header=0)
-    # df_reference = df_reference[['Código', 'Descripción']]
-    df_reference = df_reference.loc[df_reference["Nodo_Final"] == 1, ["Código", "Descripción"]].reset_index(drop=True)
-    # df_reference_embeddings = model.encode(df_reference["Descripción"].to_list(), show_progress_bar=True, convert_to_tensor=True)
-    df_reference_embeddings = read_embeddings_pre_created(ctx, "descripcion_embeddings_nodo_final_all-MiniLM-L6-v2.pt")
+    if ctx.cie_10_version == "2018":
+        df_reference = read_excel(ctx, "Diagnosticos_ES2018.xlsx", sheet_name="finales", header=0)
+        df_reference = df_reference[['codigo', 'descripcion']].reset_index(drop=True).rename(columns={'codigo': 'Código', 'descripcion': 'Descripción'})
 
+    elif ctx.cie_10_version == "2024":
+        df_reference = read_excel(ctx, "Diagnosticos_ES2024.xlsx", sheet_name="ES2024 Completa + Marcadores", header=0)
+        df_reference = df_reference.loc[df_reference["Nodo_Final"] == 1, ["Código", "Descripción"]].reset_index(drop=True)
+        # df_reference_embeddings = read_embeddings_pre_created(ctx, "descripcion_embeddings_nodo_final_all-MiniLM-L6-v2.pt")
+
+    else:
+        df_reference = read_excel(ctx, "Diagnosticos_ES2026.xlsx", sheet_name="ES2026 Completa + Marcadores", header=0)
+        df_reference = df_reference.loc[df_reference["Nodo_Final"] == 1, ["Código", "Descripción"]].reset_index(drop=True)
+
+    df_reference_embeddings = model.encode(df_reference["Descripción"].to_list(), show_progress_bar=True, convert_to_tensor=True)
     CIE10_full_list = df_reference["Código"].to_list()
 
     #################################################################################################################

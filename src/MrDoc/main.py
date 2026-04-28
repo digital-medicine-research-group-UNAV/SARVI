@@ -1,4 +1,6 @@
 import os
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import gc
 import time
 import signal
@@ -59,6 +61,14 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--cie_10_version",
+        type=str,
+        required=True,
+        choices=["2018", "2024", "2026"],
+        help="Seleccionar el año de versión de los códigos CIE10"
+    )
+
+    parser.add_argument(
         "--modo",
         type=str,
         required=True,
@@ -79,6 +89,14 @@ def main() -> None:
         type=str,
         required=True,
         help="Modelo de LLM  utilizar"
+    )
+
+    parser.add_argument(
+        "--lora_model",
+        type=str,
+        required=False,
+        default=None,
+        help="LoRA a utilizar sobre el LLM si se quiere"
     )
 
     parser.add_argument(
@@ -125,6 +143,7 @@ def main() -> None:
     cfg_llm = LLMConfig(
         service=args.llm_service, 
         model=args.llm_model,
+        lora_model=args.lora_model,
         device="cuda" if torch.cuda.is_available() else "cpu",
         num_threads=args.num_threads,
         num_interop_threads=args.num_interop_threads
@@ -134,7 +153,8 @@ def main() -> None:
         json_parse=args.json_parse,
         llm_config=cfg_llm,
         MAX_CONCURRENCY=args.max_concurrency,
-        paths=paths
+        paths=paths,
+        cie_10_version=args.cie_10_version
     )
 
     run(ctx, args.tarea, args.modo, args.folder_and_archive_name)
