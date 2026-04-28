@@ -4,7 +4,7 @@ __pycache__
 *.pyd
 *.env
 *.pt
-*.venv
+*.venv*
 
 /data/input/*
 !/data/input/.gitkeep
