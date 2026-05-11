@@ -8,7 +8,7 @@ import torch
 import asyncio
 import argparse
 import contextlib
-from .models import LLMConfig, PipelineContext, DisabledOptionError
+from .models.schemas import LLMConfig, PipelineContext, DisabledOptionError
 from .config import paths
 from .logging_redirect import enable_stdout_logging
 from .core.create_jsons_per_llm_model import run_docx_to_jsons_deterministic_sync, run_docx_to_jsons_genrative_sync, run_docx_to_jsons_deterministic_async, run_docx_to_jsons_genrative_async

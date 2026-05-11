@@ -1,7 +1,7 @@
 import traceback
 from natsort import natsorted
 
-from ..models import (
+from ..models.schemas import (
     PipelineContext,
     DOCXToJSONSConfig
 )

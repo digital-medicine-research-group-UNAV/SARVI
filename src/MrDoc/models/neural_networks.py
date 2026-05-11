@@ -1,39 +1,6 @@
 import torch
-import pandas as pd
-from torch import Tensor
 import torch.nn as nn
-from asyncio import Semaphore
-from pathlib import Path
-from pydantic import BaseModel, Field
-from typing import Any
-from torch.utils.data import Dataset
 from anytree import PostOrderIter
-
-from .config import AppPaths
-
-class DisabledOptionError(Exception):
-    pass
-
-class SpanDataset(Dataset):
-    def __init__(self, dataframe):
-        self.df = dataframe.reset_index(drop=True)
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        # Token-level embeddings
-        token_embeddings = row["Embeddings"]
-        if token_embeddings.dim() == 1:
-            token_embeddings = token_embeddings.unsqueeze(0)
-        span_repr, _ = torch.max(token_embeddings, dim=0)
-        # CLS
-        cls_repr = row["CLS Embedding"]
-        # Width
-        span_width = torch.tensor(token_embeddings.size(0), dtype=torch.long)
-
-        return span_repr, cls_repr, span_width
 
 class SpanClassifier(nn.Module):
     def __init__(self, span_dim, cls_dim, num_classes, max_span_width, width_emb_dim=25, dropout=0.1):
@@ -71,18 +38,6 @@ class SpanClassifier(nn.Module):
         logits = self.classifier(x)
 
         return logits
-
-class ICD10Dataset(Dataset):
-    def __init__(self, inputs, queries, all_desc):
-        self.inputs = inputs
-        self.queries = queries
-        self.all_desc = all_desc
-
-    def __len__(self):
-        return len(self.inputs)
-
-    def __getitem__(self, idx):
-        return self.inputs[idx], self.queries[idx], self.all_desc[idx]
 
 class ICD10Predictor_HS_Head(nn.Module):
     def __init__(self, root, decoder_query_dim=1024):
@@ -584,59 +539,3 @@ class ICD10Predictor_NO_HS(nn.Module):
         S[:, def_class_ids, subcenter_ids] = sim    # [B*Q, C, K]
         S_prime = S.max(dim=2).values               # [B*Q, C]
         return S_prime
-
-    
-class LLMConfig(BaseModel):
-    service: str
-    model: str
-    lora_model: str|None = None
-    device: str
-    num_threads: int = 16
-    num_interop_threads: int = 2
-
-class DOCXToJSONSConfig(BaseModel):
-    report_list: list[Path]
-    prompt: str|None
-    llm: Any
-    semaforo: Semaphore
-    modelo_ner: list[SpanClassifier]|None
-    node_list: dict|None
-    modelo_icd10_head: list[ICD10Predictor_HS_Head|ICD10Predictor_NO_HS]|None
-    modelo_icd10_prediction: list[ICD10Predictor_HS_CrossEntropyLoss|None]|None
-    label2id_ICD10: list[dict]|None
-    id2label_ICD10: list[dict]|None
-    id_no_hs_to_id_hs: dict|None
-    icd10_thresholds: dict|None
-
-    model_config = {
-        "arbitrary_types_allowed": True
-    }
-
-class JSONToXLSXConfig(BaseModel):
-    df_reference: pd.DataFrame
-    CIE10_full_list: list[str]
-    df_reference_embeddings: Tensor
-    llm: Any
-    semaforo: Semaphore
-    docx_lista: dict[str, str]
-    prompts: dict[str, str]
-
-    model_config = {
-        "arbitrary_types_allowed": True
-    }
-
-class PipelineContext(BaseModel):
-    paths: AppPaths
-    ussage: str
-
-    # MUTABLES
-    folder_and_archive_name: str
-    json_parse: bool = True
-    llm_config: LLMConfig
-    cie_10_version: str
-    
-    # MUTABLES (async ONLY)
-    MAX_CONCURRENCY: int = 5
-
-    # Variables auxiliares
-    vars: dict[str, Any] = Field(default_factory=dict)

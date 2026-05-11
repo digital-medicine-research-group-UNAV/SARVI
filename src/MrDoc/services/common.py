@@ -29,7 +29,9 @@ from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassific
 
 from ..data_io.reader import load_schema_info, read_torch_checkpoint, read_parquet_file
 from ..config import BASE_DIR
-from ..models import Any, PipelineContext, SpanDataset, SpanClassifier, ICD10Dataset, ICD10Predictor_HS_Head, ICD10Predictor_HS_CrossEntropyLoss, ICD10Predictor_NO_HS
+from ..models.schemas import Any, PipelineContext
+from ..models.datasets import SpanDataset, ICD10Dataset
+from ..models.neural_networks import SpanClassifier, ICD10Predictor_HS_Head, ICD10Predictor_HS_CrossEntropyLoss, ICD10Predictor_NO_HS
 
 ###
 with open(BASE_DIR / "docs" / "prompts.yml", 'r', encoding='utf-8') as file:

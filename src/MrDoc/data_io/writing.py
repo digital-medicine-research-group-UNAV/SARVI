@@ -1,7 +1,7 @@
 import json
 import pandas as pd
 from pathlib import Path
-from ..models import PipelineContext
+from ..models.schemas import PipelineContext
 
 def create_intermediate_folder_name(ctx: PipelineContext):
     intermediate_dir = ctx.paths.data_intermediate / f"Informes_JSON_{ctx.folder_and_archive_name}"
