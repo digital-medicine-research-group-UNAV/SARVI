@@ -10,7 +10,7 @@ from vllm import LLM, SamplingParams
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.lora.request import LoRARequest
 
-from ..models import LLMConfig
+from ..models.schemas import LLMConfig
 from ..data_io.reader import read_json_single
 
 #################################################################################################################

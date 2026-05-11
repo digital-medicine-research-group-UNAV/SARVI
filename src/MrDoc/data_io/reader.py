@@ -7,7 +7,7 @@ from docx import Document
 from tqdm.auto import tqdm
 from collections import defaultdict
 
-from ..models import PipelineContext, Any
+from ..models.schemas import PipelineContext, Any
 
 def read_parquet_file(ctx: PipelineContext, name: str) -> Any:
     return pd.read_parquet(ctx.paths.docs_dir / name)
