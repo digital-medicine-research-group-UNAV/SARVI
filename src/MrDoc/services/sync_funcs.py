@@ -14,6 +14,7 @@ from .common import (
     Path,
     json,
     torch,
+    time,
     cos_sim,
     SentenceTransformer,
     SpanDataset,
@@ -34,6 +35,8 @@ from .common import (
     ICD10Predictor_HS_CrossEntropyLoss,
     ICD10Predictor_NO_HS,
     tensor_items_same_structure,
+    get_missing_entities,
+    char_span_to_token_span,
     generate_sequences,
     is_valid_decoder,
     span_collate_fn,
@@ -104,7 +107,7 @@ def prepare_data(data: pd.DataFrame, padding: bool, tokenizer: Any, model: Any, 
             last_hidden_states = outputs.last_hidden_state
             last_hidden_state_list.append(last_hidden_states)
             
-        merged, logs = average_overlapping_hidden_states_checked(windows=windows, last_hidden_state_list=last_hidden_state_list, tokenizer=tokenizer, window_tokens_no_special=window_tokens_no_special, stride=stride, strict=strict)
+        merged, logs = average_overlapping_hidden_states_checked(windows=windows, last_hidden_state_list=last_hidden_state_list, window_tokens_no_special=window_tokens_no_special, stride=stride, strict=strict)
 
         for w,m in zip(windows, merged):
             w["embedding"] = m
@@ -284,114 +287,54 @@ def update_df_with_final_pred_entities(df: pd.DataFrame, file_col: str = "File",
         `df_out`: pd.DataFrame
             - Copia del DataFrame original con las columnas de predicción actualizadas. Mantiene exactamente las mismas filas, columnas, índice y forma que el DataFrame de entrada
     """
-    if fallback_when_final_span_missing not in {"keep_original", "max_existing"}:
-        raise ValueError(
-            "fallback_when_final_span_missing must be 'keep_original' or 'max_existing'"
-        )
-
+    if fallback_when_final_span_missing not in {"keep_original", "max_existing"}: raise ValueError("fallback_when_final_span_missing must be 'keep_original' or 'max_existing'")
     df_out = df.copy()
-
-    # Mapa label -> id usando las predicciones originales
-    label_to_id = (df[df[label_col] != outside_label].drop_duplicates(subset=[label_col]).set_index(label_col)[id_col].to_dict())
-
-    # Precalcular Token idx normalizado para buscar spans existentes
-    normalized_token_idx = {}
-
-    for idx, row in df.iterrows():
-        tok = normalize_list(row[token_idx_col])
-        tok = tuple(int(x) for x in tok)
-        normalized_token_idx[idx] = tok
-
-    ent_df = df[df[label_col] != outside_label].copy()
-
-    group_cols = [file_col, text_instance_col, label_col]
-
-    for (file_name, text_instance, entity_label), group in ent_df.groupby(group_cols, sort=False):
+    label_to_id = df[df[label_col].ne(outside_label)].drop_duplicates(subset=[label_col]).set_index(label_col)[id_col].to_dict()
+    normalized_token_idx = {idx: tuple(int(x) for x in normalize_list(row[token_idx_col])) for idx, row in df.iterrows()}
+    token_sets = {idx: set(tok) for idx, tok in normalized_token_idx.items()}
+    ent_df = df[df[label_col].ne(outside_label)].copy()
+    decisions = []
+    for (file_name, text_instance, entity_label), group in ent_df.groupby([file_col, text_instance_col, label_col], sort=False):
         components = get_final_entity_components_from_group(group=group, token_idx_col=token_idx_col)
-
         entity_id = label_to_id[entity_label]
-
+        mask_same_context = (df[file_col].eq(file_name) & df[text_instance_col].eq(text_instance))
+        context_indices = list(df[mask_same_context].index)
         for component in components:
             source_indices = component["source_row_indices"]
+            if len(source_indices) <= 1: continue
             final_token_idx = tuple(component["final_token_idx"])
-
-            # Si el componente tiene un solo span, no hay nada que juntar.
-            if len(source_indices) <= 1:
+            final_set = set(final_token_idx)
+            exact_candidates = [idx for idx in context_indices if normalized_token_idx[idx] == final_token_idx]
+            if exact_candidates:
+                final_row_idx = exact_candidates[0]
+                decisions.append({"label": entity_label, "id": entity_id, "final_idx": final_row_idx, "source_indices": source_indices, "final_len": len(final_token_idx)})
                 continue
-
-            # Buscar si el span final existe como fila en el df,
-            # independientemente de su predicción actual.
-            candidate_indices = []
-
-            mask_same_context = ((df[file_col] == file_name) & (df[text_instance_col] == text_instance))
-
-            for idx in df[mask_same_context].index:
-                if normalized_token_idx[idx] == final_token_idx:
-                    candidate_indices.append(idx)
-
-            if candidate_indices:
-                # Si existe el span final, usamos la primera fila que lo representa.
-                # Si tienes duplicados exactos, puedes cambiar esto para etiquetar todos.
-                final_row_idx = candidate_indices[0]
-
-                # Primero apagamos los spans previos del componente.
-                for idx in source_indices:
-                    if idx != final_row_idx:
-                        df_out.at[idx, label_col] = outside_label
-                        df_out.at[idx, id_col] = outside_id
-
-                # Luego activamos el span final.
-                df_out.at[final_row_idx, label_col] = entity_label
-                df_out.at[final_row_idx, id_col] = entity_id
-
-            else:
-                if fallback_when_final_span_missing == "keep_original":
-                    # Muy importante:
-                    # Si el span final no existe en el df, no borramos nada.
-                    continue
-
-                if fallback_when_final_span_missing == "max_existing":
-                    best_idx = None
-                    best_len = 0
-
-                    final_set = set(final_token_idx)
-
-                    for idx in df[mask_same_context].index:
-                        row_token_idx = normalized_token_idx[idx]
-                        row_set = set(row_token_idx)
-
-                        if not row_set:
-                            continue
-
-                        # Queremos un span existente dentro del rango final.
-                        if row_set.issubset(final_set):
-                            if len(row_set) > best_len:
-                                best_idx = idx
-                                best_len = len(row_set)
-
-                    if best_idx is None:
-                        continue
-
-                    # Solo hacemos algo si la mejor combinación existente
-                    # es mayor que los spans originales individuales.
-                    max_source_len = max(len(normalized_token_idx[idx]) for idx in source_indices)
-
-                    if best_len <= max_source_len:
-                        continue
-
-                    for idx in source_indices:
-                        if idx != best_idx:
-                            df_out.at[idx, label_col] = outside_label
-                            df_out.at[idx, id_col] = outside_id
-
-                    df_out.at[best_idx, label_col] = entity_label
-                    df_out.at[best_idx, id_col] = entity_id
-
-    # Garantía fuerte: mismas filas y mismas columnas
+            if fallback_when_final_span_missing == "keep_original": continue
+            possible_candidates = [idx for idx in context_indices if token_sets[idx] and token_sets[idx].issubset(final_set)]
+            if not possible_candidates: continue
+            best_idx = max(possible_candidates, key=lambda idx: (len(token_sets[idx]), -abs(min(token_sets[idx]) - min(final_set))))
+            best_len = len(token_sets[best_idx])
+            max_source_len = max(len(token_sets[idx]) for idx in source_indices)
+            if best_len < max_source_len: continue
+            decisions.append({"label": entity_label, "id": entity_id, "final_idx": best_idx, "source_indices": source_indices, "final_len": best_len})
+    decisions = sorted(decisions, key=lambda x: x["final_len"], reverse=True)
+    protected_final_indices = set()
+    for decision in decisions:
+        final_idx = decision["final_idx"]
+        source_indices = decision["source_indices"]
+        entity_label = decision["label"]
+        entity_id = decision["id"]
+        if final_idx in protected_final_indices: continue
+        for idx in source_indices:
+            if idx != final_idx:
+                df_out.at[idx, label_col] = outside_label
+                df_out.at[idx, id_col] = outside_id
+        df_out.at[final_idx, label_col] = entity_label
+        df_out.at[final_idx, id_col] = entity_id
+        protected_final_indices.add(final_idx)
     assert list(df_out.columns) == list(df.columns)
     assert list(df_out.index) == list(df.index)
     assert df_out.shape == df.shape
-
     return df_out
 
 def load_tree_hierarchical_module(df_reference: pd.DataFrame):
@@ -537,13 +480,15 @@ def construct_dataset_icd10(df: pd.DataFrame):
     all_descriptions = [d for row in df["All Description"] for d in row]
     all_query_embeddings = embed_texts(all_descriptions).half()
     queries = []
+    all_desc = []
     idx = 0
     for desc_list in df["All Description"]:
+        all_desc.append(desc_list)
         q_len = len(desc_list)
         queries.append(all_query_embeddings[idx:idx + q_len])
         idx += q_len
 
-    return inputs, queries
+    return inputs, queries, all_desc
 
 def construct_loaders_icd10(df: pd.DataFrame):
     """
@@ -559,9 +504,9 @@ def construct_loaders_icd10(df: pd.DataFrame):
         `data_loader`: DataLoader
             - DataLoader construido a partir de `ICD10Dataset`, con batches de tamaño **1**, mezcla aleatoria y memoria fijada activada
     """
-    inputs, queries = construct_dataset_icd10(df)
-    dataset = ICD10Dataset(inputs, queries)
-    data_loader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=0, pin_memory=True)
+    inputs, queries, all_desc = construct_dataset_icd10(df)
+    dataset = ICD10Dataset(inputs, queries, all_desc)
+    data_loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
     return data_loader
 
 def run_icd10_hs_model(model: ICD10Predictor_HS_Head, predictor: ICD10Predictor_HS_CrossEntropyLoss, data_loader: DataLoader):
@@ -591,27 +536,28 @@ def run_icd10_hs_model(model: ICD10Predictor_HS_Head, predictor: ICD10Predictor_
 
     all_preds = []
     all_value_preds = []
+    all_desc_global = []
 
     with torch.no_grad():
 
-        for inputs, queries in tqdm(data_loader, total=len(data_loader)):
+        for inputs, queries, all_desc in tqdm(data_loader, total=len(data_loader)):
 
             inputs = inputs.to(device, dtype=dtype, non_blocking=True)
             queries = queries.to(device, dtype=dtype, non_blocking=True)
         
             B, Q, _ = queries.shape
-            targets = targets.reshape(B * Q).long()
             
             outputs = model(queries)
             outputs, path_results = predictor.predict(outputs)
 
             all_preds.append(outputs)
             all_value_preds.append((None,path_results))
+            all_desc_global.extend(all_desc)
 
     all_preds = [x for sublist in all_preds for x in sublist]
     all_value_preds = tensor_items_same_structure(all_value_preds)
 
-    return all_preds, all_value_preds
+    return all_preds, all_value_preds, all_desc_global
 
 def run_icd10_no_hs_model(model: ICD10Predictor_NO_HS, data_loader: DataLoader):
     """
@@ -637,26 +583,27 @@ def run_icd10_no_hs_model(model: ICD10Predictor_NO_HS, data_loader: DataLoader):
 
     all_preds = []
     all_value_preds = []
+    all_desc_global = []
 
     with torch.no_grad():
 
-        for inputs, queries in tqdm(data_loader, total=len(data_loader)):
+        for inputs, queries, all_desc in tqdm(data_loader, total=len(data_loader)):
 
             inputs = inputs.to(device, dtype=dtype, non_blocking=True)
             queries = queries.to(device, dtype=dtype, non_blocking=True)
         
             B, Q, _ = queries.shape
-            targets = targets.reshape(B * Q).long()
             
             outputs = model(queries)
             all_preds.append(torch.argmax(outputs, dim=1).cpu().numpy())
             max_vals, argmax_vals = torch.max(outputs, dim=1)
 
             all_value_preds.append((None, [[(max_vals[i].item(), argmax_vals[i].item())] for i in range(outputs.size(0))]))
+            all_desc_global.extend(all_desc)
             
-    all_pred = np.concatenate(all_pred)
+    all_preds = np.concatenate(all_preds)
 
-    return all_preds, all_value_preds
+    return all_preds, all_value_preds, all_desc_global
 
 def apply_thresholds_icd10(flattened_predictions: list, thresholds: list):
     """
@@ -704,6 +651,168 @@ def apply_thresholds_icd10(flattened_predictions: list, thresholds: list):
         result.append((reached_end, stop_step, stop_value))
 
     return result
+
+def correct_entities(prompt: str, llm, correct_entities_input: dict, docs_dir: Path, json_parse: bool = False, max_attempts: int = 40, max_entities_per_call: int = 15):
+
+    def chunk_list(items: list, chunk_size: int = 30):
+        for i in range(0, len(items), chunk_size):
+            yield items[i:i + chunk_size]
+
+    def make_keep_answer(file_id: str, entities: list[dict]) -> dict:
+        return {
+            "data": [
+                {
+                    "file_id": file_id,
+                    "entities": [
+                        {
+                            "ent_id": ent["entity"]["ent_id"],
+                            "original_text": ent["entity"]["text"],
+                            "original_start": ent["entity"]["start"],
+                            "original_end": ent["entity"]["end"],
+                            "original_label": ent["target_label"],
+                            "decision": "KEEP",
+                            "corrected_text": ent["entity"]["text"],
+                            "corrected_start": ent["entity"]["start"],
+                            "corrected_end": ent["entity"]["end"],
+                            "corrected_label": ent["target_label"],
+                        }
+                        for ent in entities
+                    ],
+                }
+            ]
+        }
+        
+    answer_global = {"data": []}
+    schema_path = docs_dir / "esquema_correcion_entidades.json"
+
+    for i,data in tqdm(enumerate(correct_entities_input["data"]), desc="Correcting entities", total=len(correct_entities_input["data"])):
+        original_data = data
+        accumulated_answer = None
+        entities_to_process = original_data["entities"]
+
+        for attempt in range(1, max_attempts + 1):
+            start_time = time.perf_counter()
+
+            try:
+                for entities_chunk in chunk_list(entities_to_process, max_entities_per_call):
+                    current_input = {**original_data, "entities": entities_chunk}
+
+                    messages = [prompt, str({"data": current_input})]
+                    raw_answer = llm.invoke(messages, json_schema=schema_path)
+
+                    if json_parse:
+                        m = re.findall(r"```(?:json)?\s*(.*?)\s*```", raw_answer, re.DOTALL | re.IGNORECASE)
+
+                        json_texto = (m[-1] if m else raw_answer).strip()
+                        objetos = validate_complete_objects_from_truncated_output(json_texto)
+                        objetos_limpios = clean_objects_with_schema(objetos, schema_path)
+
+                        if not objetos_limpios:
+                            raise ValueError("No valid objects found after schema cleaning.")
+
+                        answer = {"data": objetos_limpios}
+
+                    else:
+                        answer = json.loads(raw_answer)
+
+                    if accumulated_answer is None:
+                        accumulated_answer = answer
+                    else:
+                        accumulated_answer["data"][0]["entities"].extend(answer["data"][0]["entities"])
+
+                corrected_entities = accumulated_answer["data"][0]["entities"]
+ 
+                missing_entities = get_missing_entities(original_data["entities"], corrected_entities, original_data["text"])
+
+                elapsed = time.perf_counter() - start_time
+
+                if not missing_entities:
+                    tqdm.write(f"Attempt {i} / {attempt} succeeded in {elapsed:.2f}s")
+                    break
+
+                tqdm.write(f"Attempt c{attempt} partially succeeded in {elapsed:.2f}s. Missing entities: {len(missing_entities)}")
+
+                entities_to_process = missing_entities
+
+                if attempt == max_attempts:
+                    fallback_answer = make_keep_answer(file_id=original_data["file_id"], entities=missing_entities)
+
+                    if accumulated_answer is None:
+                        accumulated_answer = fallback_answer
+                    else:
+                        accumulated_answer["data"][0]["entities"].extend(fallback_answer["data"][0]["entities"])
+
+                    tqdm.write(f"Max attempts reached for {i} / {original_data['file_id']}. Added {len(missing_entities)} missing entities as KEEP.")
+
+
+            except Exception as e:
+                elapsed = time.perf_counter() - start_time
+                tqdm.write(f"Attempt {i} / {attempt} failed in {elapsed:.2f}s: {e}")
+
+                if attempt == max_attempts:
+                    fallback_answer = make_keep_answer(file_id=original_data["file_id"], entities=missing_entities)
+
+                    if accumulated_answer is None:
+                        accumulated_answer = fallback_answer
+                    else:
+                        accumulated_answer["data"][0]["entities"].extend(fallback_answer["data"][0]["entities"])
+
+                    tqdm.write(f"Max attempts reached for {i} / {original_data['file_id']}. Added {len(missing_entities)} missing entities as KEEP.")
+
+        if accumulated_answer is None:
+            raise ValueError("No valid answer was produced by the LLM.")
+
+        answer_global["data"].append(accumulated_answer["data"][0])
+
+    return answer_global
+
+def corrected_entities_to_df(answer_global: dict, original_texts: dict[str, str]) -> pd.DataFrame: 
+    rows = []
+
+    labels = ["ACTOR", "CLINENTITY", "TIMEX3"]
+
+    for item in answer_global["data"]:
+        file_id = item["file_id"]
+        text = original_texts[file_id]
+
+        row = {"Text": text, "Original File": file_id}
+
+        grouped = {label: {"texts": [], "token_idxs": []} for label in labels}
+
+        for ent in item["entities"]:
+            if ent["decision"] == "REJECT":
+                continue
+
+            corrected_text = ent["corrected_text"]
+            corrected_start = ent["corrected_start"]
+            corrected_end = ent["corrected_end"]
+            corrected_label = ent["corrected_label"]
+
+            if corrected_label is None:
+                continue
+
+            if corrected_label not in grouped:
+                continue
+
+            token_idxs = char_span_to_token_span(text=text, start=corrected_start, end=corrected_end)
+
+            grouped[corrected_label]["texts"].append(corrected_text)
+            grouped[corrected_label]["token_idxs"].append(token_idxs)
+
+        row["All ACTOR"] = grouped["ACTOR"]["texts"]
+        row["All ACTOR Token idx"] = grouped["ACTOR"]["token_idxs"]
+
+        row["All Description"] = grouped["CLINENTITY"]["texts"]
+        row["All Description Token idx"] = grouped["CLINENTITY"]["token_idxs"]
+
+        row["All TIMEX3"] = grouped["TIMEX3"]["texts"]
+        row["All TIMEX3 Token idx"] = grouped["TIMEX3"]["token_idxs"]
+
+        rows.append(row)
+
+    columns = ["Text", "All ACTOR", "All ACTOR Token idx", "All Description", "All Description Token idx", "All TIMEX3", "All TIMEX3 Token idx", "Original File"]
+
+    return pd.DataFrame(rows, columns=columns)
 
 def procesar_docx(informe_texto: str, report: Path, prompt: str, llm, json_parse: bool, docs_dir: Path):
     """

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Esquema de Decisiones de Entidades",
+  "type": "object",
+  "properties": {
+    "data": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "file_id": {
+            "type": "string"
+          },
+          "entities": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {
+                "ent_id": {
+                  "type": "integer"
+                },
+                "original_text": {
+                  "type": "string"
+                },
+                "original_start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "original_end": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "original_label": {
+                  "type": "string",
+                  "enum": ["CLINENTITY", "TIMEX3", "ACTOR"]
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": ["KEEP", "REJECT", "CHANGE", "MODIFY_SPAN"]
+                },
+                "corrected_text": {
+                  "type": ["string", "null"]
+                },
+                "corrected_start": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "corrected_end": {
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "corrected_label": {
+                  "type": ["string", "null"],
+                  "enum": ["CLINENTITY", "TIMEX3", "ACTOR", null]
+                }
+              },
+              "required": [
+                "ent_id",
+                "original_text",
+                "original_start",
+                "original_end",
+                "original_label",
+                "decision",
+                "corrected_text",
+                "corrected_start",
+                "corrected_end",
+                "corrected_label"
+              ],
+              "additionalProperties": false,
+              "if": {
+                "properties": {
+                  "decision": {
+                    "const": "REJECT"
+                  }
+                },
+                "required": ["decision"]
+              },
+              "then": {
+                "properties": {
+                  "corrected_text": {
+                    "type": "null"
+                  },
+                  "corrected_start": {
+                    "type": "null"
+                  },
+                  "corrected_end": {
+                    "type": "null"
+                  },
+                  "corrected_label": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "corrected_text": {
+                    "type": "string"
+                  },
+                  "corrected_start": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "corrected_end": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "corrected_label": {
+                    "type": "string",
+                    "enum": ["CLINENTITY", "TIMEX3", "ACTOR"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "required": ["file_id", "entities"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["data"],
+  "additionalProperties": false
+}
