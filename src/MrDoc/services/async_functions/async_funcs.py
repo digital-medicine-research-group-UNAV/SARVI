@@ -7,7 +7,7 @@ import traceback
 from ftfy import fix_text
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from .common import (
+from ..common.common import (
     re,
     pd,
     Path,

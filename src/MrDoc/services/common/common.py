@@ -15,7 +15,6 @@ import plotly.express as px
 from pathlib import Path
 from tqdm.auto import tqdm
 from stop_words import get_stop_words
-from text_to_num import text2num
 import xml.etree.ElementTree as ET
 from IPython.display import HTML, display
 from torch.utils.data import DataLoader
@@ -27,11 +26,13 @@ from sentence_transformers.util import cos_sim
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 
-from ..data_io.reader import load_schema_info, read_torch_checkpoint, read_parquet_file
-from ..config import BASE_DIR
-from ..models.schemas import Any, PipelineContext
-from ..models.datasets import SpanDataset, ICD10Dataset
-from ..models.neural_networks import SpanClassifier, ICD10Predictor_HS_Head, ICD10Predictor_HS_CrossEntropyLoss, ICD10Predictor_NO_HS
+from .common.helpers.span_creation import get_edge_words, is_number, has_bad_surrounding
+
+from ...data_io.reader import load_schema_info, read_torch_checkpoint, read_parquet_file
+from ...config import BASE_DIR
+from ...models.schemas import Any, PipelineContext
+from ...models.datasets import SpanDataset, ICD10Dataset
+from ...models.neural_networks import SpanClassifier, ICD10Predictor_HS_Head, ICD10Predictor_HS_CrossEntropyLoss, ICD10Predictor_NO_HS
 
 ###
 with open(BASE_DIR / "docs" / "prompts.yml", 'r', encoding='utf-8') as file:
@@ -52,19 +53,6 @@ cie10_judger_model = AutoModelForSequenceClassification.from_pretrained("JulenRM
 
 tokenizer_ner = AutoTokenizer.from_pretrained("IIC/RigoBERTa-Clinical", trim_offsets=False, use_fast=True)
 model_ner = AutoModel.from_pretrained("IIC/RigoBERTa-Clinical").to(device)
-
-@contextlib.contextmanager
-def suppress_stderr():
-    old_stderr = os.dup(2)
-    devnull = os.open(os.devnull, os.O_WRONLY)
-    try:
-        os.dup2(devnull, 2)
-        yield
-    finally:
-        os.dup2(old_stderr, 2)
-        os.close(old_stderr)
-        os.close(devnull)
-
 ###
 
 def procesar_json_diagnosticos(data: dict[str, dict]) -> pd.DataFrame:
@@ -938,176 +926,6 @@ def generate_sequences(tokenizer: Any, sequence: list, max_len: int = 10):
             sequences_span.append((seq, span_tokens, next_token))
 
     return sequences_span
-
-def is_number(token: str):
-    """
-    Comprueba si un token representa un número, ya sea en formato numérico o escrito en texto en inglés o español.
-
-    Parameters
-    ----------
-        `token`: str
-            - Token que se quiere evaluar como posible número
-
-    Returns
-    -------
-        ``: bool
-            - `True` si el token puede interpretarse como número. En caso contrario, devuelve `False`
-    """
-    token = str(token).strip("▁").strip()
-    if not token:
-        return False
-    try:
-        float(token.replace(",", "."))
-        return True
-    except Exception:
-        pass
-
-    lowered = token.lower().replace("-", " ").strip()
-    if not lowered:
-        return False
-
-    for lang in ("en", "es"):
-        try:
-            with suppress_stderr():
-                text2num(lowered, lang)
-            return True
-        except Exception:
-            pass
-
-    return False
-    
-
-def merge_sentencepiece_words(tokens: list):
-    """
-    Reconstruye palabras completas a partir de tokens generados por un tokenizer tipo SentencePiece
-
-    Parameters
-    ----------
-        `tokens`: list
-            - Lista de tokens. Los tokens que empiezan por `▁` se interpretan como el inicio de una nueva palabra
-
-    Returns
-    -------
-        `words`: list
-            - Lista de palabras reconstruidas a partir de los tokens originales
-    """
-    words = []
-    current = []
-
-    for tok in tokens:
-        if tok.startswith("▁"):
-            if current:
-                words.append("".join(current))
-            current = [tok[1:]]  # remove ▁
-        else:
-            if current:
-                current.append(tok)
-            else:
-                current = [tok]
-
-    if current:
-        words.append("".join(current))
-
-    return words
-    
-def is_punct(word: str):
-    """
-    Comprueba si una palabra está formada únicamente por signos de puntuación.
-
-    Parameters
-    ----------
-        `word`: str
-            - Palabra o token que se quiere comprobar
-
-    Returns
-    -------
-        ``: bool
-            - `True` si todos los caracteres de `word` son signos de puntuación y la cadena no está vacía. En caso contrario, devuelve `False`
-    """
-    return all(ch in string.punctuation for ch in word) and len(word) > 0
-
-def is_stopword_punct_or_number(word: str, stopwords_es: list):
-    """
-    Comprueba si una palabra es una stopword, un signo de puntuación o un número.
-
-    Parameters
-    ----------
-        `word`: str
-            - Palabra que se quiere evaluar
-
-        `stopwords_es`: list
-            - Lista de stopwords en español usadas como criterio de filtrado
-
-    Returns
-    -------
-        ``: bool
-            - `True` si la palabra es una stopword, puntuación o número. En caso contrario, devuelve `False`
-    """
-    word = word.strip().lower()
-    return (word in stopwords_es or is_number(word) or is_punct(word))
-
-
-def has_bad_surrounding(decoder:list, stopwords_es: list, limit_stopwords_surround: int):
-    """
-    Evalúa si los tokens de contenido de un span están rodeados por demasiadas stopwords, números o signos de puntuación.
-
-    Parameters
-    ----------
-        `decoder`: list
-            - Lista de tokens decodificados que forman el span
-
-        `stopwords_es`: list
-            - Lista de stopwords en español usadas para detectar palabras poco informativas
-
-        `limit_stopwords_surround`: int
-            - Número máximo de palabras de contexto que se revisan alrededor de cada palabra de contenido
-
-    Returns
-    -------
-        ``: bool
-            - `True` si el span presenta un contexto considerado problemático. Devuelve `False` si encuentra una palabra de contenido con contexto aceptable
-    """
-    words = merge_sentencepiece_words(decoder)
-    span = limit_stopwords_surround + 1
-
-    for i, word in enumerate(words):
-        if is_stopword_punct_or_number(word, stopwords_es):
-            continue
-        
-        # check right
-        if i - span >= 0:
-            left_words = words[i - span:i]
-            if all(is_stopword_punct_or_number(w, stopwords_es) for w in left_words):
-                return False
-
-        # check left
-        if i + span < len(words):
-            right_words = words[i + 1:i + 1 + span]
-            if all(is_stopword_punct_or_number(w, stopwords_es) for w in right_words):
-                return False
-
-    return True
-
-def get_edge_words(decoder: list):
-    """
-    Obtiene la primera y la última palabra de un span tras reconstruir las palabras completas desde tokens tipo SentencePiece.
-
-    Parameters
-    ----------
-        `decoder`: list
-            - Lista de tokens decodificados que forman el span
-
-    Returns
-    -------
-        ``: tuple
-            - Tupla con la primera y la última palabra en minúsculas. Si no hay palabras, devuelve **("", "")**
-    """
-    words = merge_sentencepiece_words(decoder)
-
-    if not words:
-        return "", ""
-
-    return words[0].lower(), words[-1].lower()
 
 def is_valid_decoder(decoder: list, next_token: list, tokenizer: Any, limit_stopwords_surround: int = 3):
     """
