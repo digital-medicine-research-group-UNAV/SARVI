@@ -6,7 +6,7 @@ from ..models import (
     DOCXToJSONSConfig
 )
 
-from ..io.reader import (
+from ..data_io.reader import (
     textwrap,
     cargar_docx_single,
     cargar_docx_lista,
@@ -14,7 +14,7 @@ from ..io.reader import (
     read_excel,
     read_parquet_file
 )
-from ..io.writing import (
+from ..data_io.writing import (
     create_intermediate_folder_name,
     write_json
 )

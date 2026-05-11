@@ -38,17 +38,17 @@ def run(ctx: PipelineContext, tarea: str, ussage: str, modo: str, folder_and_arc
     log_file = ctx.paths.logs_dir / f"{tarea}_{modo.upper()}_{folder_and_archive_name}.log"
     enable_stdout_logging(log_file)
 
-    print(f"Ejecutando {tarea} // modo {modo}...")
+    print(f"Ejecutando {tarea} // modo {modo} // ussage {ussage}...")
 
     if tarea == "docx_to_jsons":
         if modo == "sync":
-            if ussage == "determenistic":
-                run_docx_to_jsons_deterministic_sync(ctx)
+            if ussage == "deterministic":
+                return run_docx_to_jsons_deterministic_sync(ctx)
             else:
                 run_docx_to_jsons_genrative_sync(ctx)
         else:
-            if ussage == "determenistic":
-                run_docx_to_jsons_deterministic_async(ctx)
+            if ussage == "deterministic":
+                asyncio.run(run_docx_to_jsons_deterministic_async(ctx))
             else:
                 asyncio.run(run_docx_to_jsons_genrative_async(ctx))
 
@@ -59,7 +59,7 @@ def run(ctx: PipelineContext, tarea: str, ussage: str, modo: str, folder_and_arc
             asyncio.run(run_jsons_to_xlsx_async(ctx))
 
     print("Ejecución finalizada.")
-    terminate_process()    
+    # terminate_process()    
 
 
 def main() -> None:

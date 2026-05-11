@@ -11,7 +11,7 @@ from vllm.sampling_params import StructuredOutputsParams
 from vllm.lora.request import LoRARequest
 
 from ..models import LLMConfig
-from ..io.reader import read_json_single
+from ..data_io.reader import read_json_single
 
 #################################################################################################################
 class LLMTransformersWrapper:
