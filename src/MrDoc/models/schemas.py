@@ -8,6 +8,9 @@ from typing import Any
 from .neural_networks import ICD10Predictor_HS_Head, ICD10Predictor_NO_HS, ICD10Predictor_HS_CrossEntropyLoss
 from .datasets import SpanClassifier
 from ..config import AppPaths
+
+class DisabledOptionError(Exception):
+    pass
   
 class LLMConfig(BaseModel):
     service: str

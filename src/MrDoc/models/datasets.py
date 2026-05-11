@@ -1,9 +1,6 @@
 import torch
 from torch.utils.data import Dataset
 
-class DisabledOptionError(Exception):
-    pass
-
 class SpanDataset(Dataset):
     def __init__(self, dataframe):
         self.df = dataframe.reset_index(drop=True)
