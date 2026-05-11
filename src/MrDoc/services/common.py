@@ -5,6 +5,8 @@ import json
 import yaml
 import torch
 import string
+import random
+import time
 import warnings
 import contextlib
 import numpy as np
@@ -1749,12 +1751,14 @@ def embed_texts(texts: list, batch_size: int = 64, max_length: int = 512, show_t
     embeddings = [cache[t] for t in texts]
     return torch.stack(embeddings)
 
-def create_all_labels_desc(label2id):
+def create_all_labels_desc(ctx: PipelineContext, label2id: dict):
     """
     Crea un diccionario de embeddings de descripciones para todas las etiquetas, combinando información de distintos conjuntos de datos.
 
     Parameters
     ----------
+        `ctx`: PipelineContext
+            - Contexto del modelo completo
         `label2id`: dict
             - Diccionario con la traduccion de códigos a ids
 
@@ -1763,7 +1767,7 @@ def create_all_labels_desc(label2id):
         `all_labels_desc`: dict
             - Diccionario donde cada clave es el ID numérico de una etiqueta y cada valor es un tensor con los embeddings de las descripciones asociadas a esa etiqueta
     """
-    df = read_parquet_file("full_icd10_2026.parquet")
+    df = read_parquet_file(ctx, "full_icd10_2026.parquet")
     df["target_id"] = df["Code Perceiver"].map(label2id)
 
     all_labels_desc_ORIGINAL = defaultdict(list)
@@ -1772,7 +1776,7 @@ def create_all_labels_desc(label2id):
 
     ####################################
 
-    df = read_parquet_file("codiesp_train.parquet")
+    df = read_parquet_file(ctx, "codiesp_train.parquet")
     df = df[df["All Code Full"].str.len() > 0]
     df["target_id"] = df["All Code Perceiver"].apply(lambda x: [label2id[c] for c in x])
 
@@ -1783,7 +1787,7 @@ def create_all_labels_desc(label2id):
 
     ####################################
 
-    df = read_parquet_file("cares_train.parquet")
+    df = read_parquet_file(ctx, "cares_train.parquet")
     df = df[df["All Code Full"].str.len() > 0]
     df["target_id"] = df["All Code Perceiver"].apply(lambda x: [label2id[c] for c in x])
 
@@ -1794,7 +1798,7 @@ def create_all_labels_desc(label2id):
 
     ####################################
 
-    df = read_parquet_file("cares_test.parquet")
+    df = read_parquet_file(ctx, "cares_test.parquet")
     df = df[df["All Code Full"].str.len() > 0]
     df["target_id"] = df["All Code Perceiver"].apply(lambda x: [label2id[c] for c in x])
 
@@ -1804,7 +1808,7 @@ def create_all_labels_desc(label2id):
 
     ####################################
 
-    df = read_parquet_file("not_codiesp_cares_general.parquet")
+    df = read_parquet_file(ctx, "not_codiesp_cares_general.parquet")
     all_labels_desc_REST = dict(zip(df["All Code Full"].map(label2id), df["All Description"]))
     
     ####################################
@@ -1824,27 +1828,27 @@ def initialize_icd10_hs_head_model(ctx: PipelineContext, name: str, root: Softma
     checkpoint = read_torch_checkpoint(ctx, name)
 
     model = ICD10Predictor_HS_Head(root).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
     return model
 
 def initialize_icd10_hs_prediction_model(ctx: PipelineContext, name: str, label2id: dict, root: SoftmaxNode, internal_K: int = 3) -> ICD10Predictor_HS_CrossEntropyLoss:
     checkpoint = read_torch_checkpoint(ctx, name)
 
-    all_labels_desc = create_all_labels_desc(label2id)
+    all_labels_desc = create_all_labels_desc(ctx, label2id)
 
     model = ICD10Predictor_HS_CrossEntropyLoss(root, all_labels_desc, internal_K).to(device)
-    model.load_state_dict(checkpoint["optimizer_state_dict"])
+    model.load_state_dict(checkpoint["optimizer_state_dict"], strict=False)
 
     return model
 
 def initialize_icd10_no_hs_head_model(ctx: PipelineContext, name: str, label2id: dict, root: SoftmaxNode) -> ICD10Predictor_NO_HS:
     checkpoint = read_torch_checkpoint(ctx, name)
 
-    all_labels_desc = create_all_labels_desc(label2id)
+    all_labels_desc = create_all_labels_desc(ctx, label2id)
 
     model = ICD10Predictor_NO_HS(root, all_labels_desc).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
     return model
 
@@ -2049,3 +2053,96 @@ def extract_flattened_predictions(data: list, all_preds: list):
         warnings.warn(f"Número de series ({len(flattened_predictions)}) distinto de ({len(all_preds)}).")
 
     return flattened_predictions
+
+
+def lit(x):
+    if isinstance(x, str):
+        try:
+            return ast.literal_eval(x)
+        except Exception:
+            return x
+    return x
+
+
+def span_from_tokens(text, idxs, base=0):
+    offsets = tokenizer_ner(text, return_offsets_mapping=True, add_special_tokens=False, truncation=False)["offset_mapping"]
+
+    idxs = lit(idxs)
+    idxs = list(idxs) if isinstance(idxs, (list, tuple)) else []
+
+    spans = [offsets[i - base] for i in idxs if 0 <= i - base < len(offsets)]
+
+    if not spans:
+        return None, None
+
+    return min(s[0] for s in spans), max(s[1] for s in spans)
+
+
+def build_ner_json(df, token_index_base=0):
+    data = []
+
+    LABEL_MAP = {"All ACTOR": "ACTOR", "All Description": "CLINENTITY", "All TIMEX3": "TIMEX3"}
+
+    for _, row in df.iterrows():
+        text = row["Text"]
+        entities_out = []
+        ent_id = 0
+
+        for col, label in LABEL_MAP.items():
+            ents = lit(row.get(col, []))
+            idxs = lit(row.get(f"{col} Token idx", []))
+
+            if not isinstance(ents, list) or not isinstance(idxs, list):
+                continue
+
+            for ent_text, token_idxs in zip(ents, idxs):
+                start, end = span_from_tokens(text, token_idxs, base=token_index_base)
+
+                if start is None:
+                    continue
+
+                entities_out.append({
+                    "target_label": label,
+                    "entity": {
+                        "ent_id": ent_id,
+                        "text": ent_text,
+                        "start": start,
+                        "end": end,
+                    }
+                })
+
+                ent_id += 1
+
+        data.append({
+            "file_id": row["Original File"],
+            "text": text,
+            "entities": entities_out
+        })
+
+    return {"data": data}
+
+def entity_matches_correction(ent: dict, cor: dict, original_text: str) -> bool:
+    # return (ent["entity"]["start"] == cor["original_start"] and ent["entity"]["end"] == cor["original_end"] and ent["entity"]["text"] == cor["original_text"] and original_text[cor["original_start"]:cor["original_end"]] == cor["original_text"])
+    return (ent["entity"]["start"] == cor["original_start"] and ent["entity"]["end"] == cor["original_end"] and ent["entity"]["text"] == cor["original_text"])
+
+
+def get_missing_entities(original_entities: list[dict], corrected_entities: list[dict], original_text: str) -> list[dict]:
+    missing = []
+
+    for ent in original_entities:
+        exists = any(entity_matches_correction(ent, cor, original_text) for cor in corrected_entities)
+        if not exists:
+            missing.append(ent)
+
+    return missing
+
+def char_span_to_token_span(text: str, start: int, end: int):
+    encoding = tokenizer_ner(text, return_offsets_mapping=True, add_special_tokens=False)
+
+    token_idxs = []
+
+    for i, (tok_start, tok_end) in enumerate(encoding["offset_mapping"]):
+        if tok_start < end and tok_end > start:
+            token_idxs.append(i)
+
+    return token_idxs
