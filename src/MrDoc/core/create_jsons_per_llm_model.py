@@ -19,8 +19,8 @@ from ..data_io.writing import (
     write_json
 )
 
-from ..services.llm_loader import load_llm
-from ..services.common import (
+from ..services.common.llm_loader import load_llm
+from ..services.common.common import (
     tqdm,
     ast,
     pd,
@@ -40,7 +40,7 @@ from ..services.common import (
     extract_flattened_predictions,
     prompts as prompts_total
 )
-from ..services.sync_funcs import (
+from ..services.sync_functions.sync_funcs import (
     load_tree_hierarchical_module,
     procesar_docx as procesar_docx_SYNC,
     prepare_data as prepare_data_SYNC,
@@ -54,7 +54,7 @@ from ..services.sync_funcs import (
     correct_entities as correct_entities_SYNC,
     corrected_entities_to_df as corrected_entities_to_df_SYNC
 )
-from ..services.async_funcs import (
+from ..services.async_functions.async_funcs import (
     asyncio,
     procesar_docx as procesar_docx_ASYNC
 )

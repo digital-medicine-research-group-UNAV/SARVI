@@ -18,8 +18,8 @@ from ..data_io.writing import (
     write_excel_final
 )
 
-from ..services.llm_loader import load_llm
-from ..services.common import (
+from ..services.common.llm_loader import load_llm
+from ..services.common.common import (
     pd,
     torch,
     model,
@@ -28,13 +28,13 @@ from ..services.common import (
     clean_df_obtained_with_llm,
     completar_df_extra_data_for_analysis
 )
-from ..services.sync_funcs import (
+from ..services.sync_functions.sync_funcs import (
     completar_df_predicted_nearest_text_only as completar_df_predicted_nearest_text_only_SYNC,
     asistente_seleccionador_cie10 as asistente_seleccionador_cie10_SYNC,
     asistente_juzgador_cie10 as asistente_juzgador_cie10_SYNC,
     asistente_seleccionador_tratamiento_falsos_cie10 as asistente_seleccionador_tratamiento_falsos_cie10_SYNC
 )
-from ..services.async_funcs import (
+from ..services.async_functions.async_funcs import (
     asyncio,
     completar_df_predicted_nearest_text_only as completar_df_predicted_nearest_text_only_ASYNC,
     asistente_seleccionador_cie10 as asistente_seleccionador_cie10_ASYNC,
