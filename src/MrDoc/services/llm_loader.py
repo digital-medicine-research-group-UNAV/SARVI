@@ -97,7 +97,7 @@ class LLMvLLMWrapper:
         ]
 
         json_schema_llm_response = read_json_single(kwargs.get("json_schema"))
-        sampling_params = SamplingParams(temperature=0, max_tokens=8192, structured_outputs=StructuredOutputsParams(json=json_schema_llm_response))
+        sampling_params = SamplingParams(temperature=0, max_tokens=16384, structured_outputs=StructuredOutputsParams(json=json_schema_llm_response))
         
         if self.lora_model is not None:
             if "BIO_QA_ITTF" in self.lora_model:

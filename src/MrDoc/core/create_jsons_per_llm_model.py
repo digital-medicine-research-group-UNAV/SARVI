@@ -11,7 +11,8 @@ from ..io.reader import (
     cargar_docx_single,
     cargar_docx_lista,
     read_json_single,
-    read_excel
+    read_excel,
+    read_parquet_file
 )
 from ..io.writing import (
     create_intermediate_folder_name,
@@ -24,6 +25,8 @@ from ..services.common import (
     ast,
     pd,
     device,
+    random,
+    build_ner_json,
     tokenizer_ner,
     model_ner,
     merge_sentencepiece_words,
@@ -32,6 +35,7 @@ from ..services.common import (
     initialize_icd10_hs_prediction_model,
     initialize_icd10_no_hs_head_model,
     id2label_ner,
+    label2id_ner,
     remap_ids,
     extract_flattened_predictions,
     prompts as prompts_total
@@ -46,7 +50,9 @@ from ..services.sync_funcs import (
     construct_loaders_icd10 as construct_loaders_icd10_SYNC,
     run_icd10_hs_model as run_icd10_hs_model_SYNC,
     run_icd10_no_hs_model as run_icd10_no_hs_model_SYNC, 
-    apply_thresholds_icd10 as apply_thresholds_icd10_SYNC
+    apply_thresholds_icd10 as apply_thresholds_icd10_SYNC,
+    correct_entities as correct_entities_SYNC,
+    corrected_entities_to_df as corrected_entities_to_df_SYNC
 )
 from ..services.async_funcs import (
     asyncio,
@@ -92,12 +98,13 @@ def initialize_variables(ctx: PipelineContext):
         id_no_hs_to_id_hs = None
         icd10_thresholds = None
     else:
-        llm = None
-        prompt = None
+        llm = load_llm(ctx.llm_config)
+        prompt = textwrap.dedent(prompts_total["correct_entities"])
         modelo_ner = [initialize_span_ner_model(ctx, "NER_checkpoint.pt"), initialize_span_ner_model(ctx, "NER_checkpoint_FT.pt")]
         node_list = load_tree_hierarchical_module(df_reference)
 
-        root = root.set_indexes()
+        root = node_list["root"]
+        root.set_indexes()
         label2id_hs = {key.name: value for key, value in root.node_to_id.items()}
         id2label_hs = {value: key for key, value in label2id_hs.items()}
         label2id_no_hs = {id2label_hs[value.item()]: i for i, value in enumerate(root.leaf_indexes)}
@@ -133,23 +140,27 @@ def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
     config = initialize_variables(ctx)
 
     # ------------------------------NER------------------------------
+    print("1.1. Creating NER data")
     dict_data = cargar_docx_lista(ctx.paths.data_input / ctx.folder_and_archive_name)
     df_data = pd.DataFrame(list(dict_data.items()), columns=["archivo_origen", "Text"])
 
-    df_data = prepare_data_SYNC(df_data, padding=False, tokenizer=tokenizer_ner, model=model_ner, data_files_type="span", device=device)
-    df_data_full, data_loader_full = construct_loaders_ner_SYNC(data=df_data, tokenizer=tokenizer_ner)
-    df_data_diags, data_loader_diags = construct_loaders_ner_SYNC(data=df_data, tokenizer=tokenizer_ner)
+    df_data_prepared = prepare_data_SYNC(df_data, padding=False, tokenizer=tokenizer_ner, model=model_ner, device=device)
+    df_data_full, data_loader_full = construct_loaders_ner_SYNC(data=df_data_prepared, tokenizer=tokenizer_ner)
+    df_data_diags, data_loader_diags = construct_loaders_ner_SYNC(data=df_data_prepared, tokenizer=tokenizer_ner)
 
+    print("1.2. Running NER model // FULL")
     all_pred_full, all_value_preds_full = run_ner_model_SYNC(config.modelo_ner[0], data_loader=data_loader_full, device=device)
     df_data_full["pred_id"] = all_pred_full
     df_data_full["pred_label"] = df_data_full["pred_id"].map(id2label_ner)
     df_data_full = update_df_with_final_pred_entities_SYNC(df_data_full)
 
+    print("1.3. Running NER model // DIAGS")
     all_pred_diags, all_value_preds_diags = run_ner_model_SYNC(config.modelo_ner[1], data_loader=data_loader_diags, device=device)
     df_data_diags["pred_id"] = all_pred_diags
     df_data_diags["pred_label"] = df_data_diags["pred_id"].map(id2label_ner)
     df_data_diags = update_df_with_final_pred_entities_SYNC(df_data_diags)
 
+    print("1.4. Mixing NER results")
     cols_check = [c for c in df_data_diags.columns if c not in ["CLS Embedding", "Embeddings", "pred_id", "pred_label"]]
     assert df_data_diags[cols_check].equals(df_data_full[cols_check])
     mask = ~df_data_full["pred_label"].isin([id2label_ner[1], id2label_ner[2]])
@@ -158,36 +169,64 @@ def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
 
     df_final_ner = df_final_ner[['File', 'Tokens', 'Decoded span', 'Token idx', 'Text instance', 'pred_id', 'pred_label']]
 
-    tmp = df_final_ner[df_final_ner["pred_id"].eq(1) | df_final_ner["pred_label"].eq("CLINENTITY")].copy()
-    tmp["Tokens"] = tmp["Tokens"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+    print("1. -> 2. Transforming data to predict ICD10")
+    ner_labels = [label for label in dict.fromkeys(list(id2label_ner.values()) + list(label2id_ner.keys())) if label != "O"]
+    out_labels = list(dict.fromkeys(["Description" if label == "CLINENTITY" else label for label in ner_labels]))
+
+    tmp = df_final_ner.copy()
+    tmp["ner_label"] = tmp["pred_label"].where(tmp["pred_label"].isin(ner_labels), tmp["pred_id"].map({v: k for k, v in label2id_ner.items()}))
+    tmp = tmp[tmp["ner_label"].isin(ner_labels)].copy()
+    tmp["Decoded span"] = tmp["Decoded span"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
     tmp["Token idx"] = tmp["Token idx"].apply(lambda x: tuple(ast.literal_eval(x) if isinstance(x, str) else x))
-    tmp["entity"] = tmp["Tokens"].apply(lambda toks: " ".join(merge_sentencepiece_words(toks)))
-    tmp = tmp.drop_duplicates(subset=["File", "Token idx", "entity"])
+    tmp["entity"] = tmp["Decoded span"].apply(lambda toks: " ".join(merge_sentencepiece_words(toks)))
+    tmp["out_label"] = tmp["ner_label"].replace({"CLINENTITY": "Description"})
+    tmp = tmp.drop_duplicates(subset=["File", "out_label", "Token idx", "entity"])
 
-    entities_by_file = (tmp.groupby("File")["entity"].apply(list).reset_index(name="All Descriptions"))
+    entities_by_file = tmp.groupby(["File", "out_label"]).agg(entity=("entity", list), token_idx=("Token idx", list)).reset_index()
+    entities_by_file = entities_by_file.pivot(index="File", columns="out_label", values=["entity", "token_idx"]).reset_index()
+    entities_by_file.columns = ["File"] + [f"All {label}" if kind == "entity" else f"All {label} Token idx" for kind, label in entities_by_file.columns[1:]]
 
-    df_final_ner = (df_data[["archivo_origen", "Text"]].merge(entities_by_file, left_on="archivo_origen", right_on="File", how="left"))
-    df_final_ner["All Descriptions"] = df_final_ner["All Descriptions"].apply(lambda x: x if isinstance(x, list) else [])
-    df_final_ner = df_final_ner.rename(columns={"archivo_origen": "Original File"})[["Text", "All Descriptions", "Original File"]]
+    df_final_ner = df_data[["archivo_origen", "Text"]].merge(entities_by_file, left_on="archivo_origen", right_on="File", how="left")
+    for col in [col for label in out_labels for col in (f"All {label}", f"All {label} Token idx")]: df_final_ner[col] = df_final_ner[col].apply(lambda x: x if isinstance(x, list) else [])
+    df_final_ner = df_final_ner.rename(columns={"archivo_origen": "Original File"})[["Text"] + [col for label in out_labels for col in (f"All {label}", f"All {label} Token idx")] + ["Original File"]]
+
+    # ------------------------------Correct NER------------------------------
+    print("1. -> 2. Fixing entities")
+    codiesp_train = read_parquet_file(ctx, "codiesp_train.parquet")
+    e3c_trian = read_parquet_file(ctx, "e3c_train.parquet")
+
+    random_clinentity = list(set(random.sample([s for arr in codiesp_train["All Description"].dropna() for s in arr], k=min(30, len([s for arr in codiesp_train["All Description"].dropna() for s in arr])))))
+    random_actor = list(set(random.sample([s for arr in e3c_trian["All ACTOR"].dropna() for s in arr], k=min(30, len([s for arr in e3c_trian["All ACTOR"].dropna() for s in arr])))))
+    random_timex3 = list(set(random.sample([s for arr in e3c_trian["All TIMEX3"].dropna() for s in arr], k=min(30, len([s for arr in e3c_trian["All TIMEX3"].dropna() for s in arr])))))
+
+    config.prompt = config.prompt.format(random_clinentity=random_clinentity, random_actor=random_actor, random_timex3=random_timex3)
+    correct_entities_input = build_ner_json(df_final_ner, token_index_base=1)
+    entities_correction_decision = correct_entities_SYNC(config.prompt, config.llm, correct_entities_input, ctx.paths.docs_dir, ctx.json_parse)
+    df_final_ner_corrected = corrected_entities_to_df_SYNC(entities_correction_decision, dict_data)
 
     # ------------------------------CIE10------------------------------
-    data_loader = construct_loaders_icd10_SYNC(data=df_final_ner, tokenizer=tokenizer_ner)
+    print("2.1. Creating ICD10 prediction data")
+    data_loader = construct_loaders_icd10_SYNC(df_final_ner_corrected)
 
-    all_pred_yes_hs, all_value_preds_yes_hs = run_icd10_hs_model_SYNC(config.modelo_icd10_head[0], config.modelo_icd10_prediction[0], data_loader)
-    all_pred_no_hs, all_value_preds_no_hs = run_icd10_no_hs_model_SYNC(config.modelo_icd10_head[1], data_loader)
+    print("2.2. Running ICD10 prediction data // YES HS")
+    all_pred_yes_hs, all_value_preds_yes_hs, all_desc_global_yes_hs = run_icd10_hs_model_SYNC(config.modelo_icd10_head[0], config.modelo_icd10_prediction[0], data_loader)
+    print("2.3. Running ICD10 prediction data // NO HS")
+    all_pred_no_hs, all_value_preds_no_hs, all_desc_global_no_hs = run_icd10_no_hs_model_SYNC(config.modelo_icd10_head[1], data_loader)
 
     all_pred_no_hs = [config.id_no_hs_to_id_hs[i] for i in all_pred_no_hs]
     all_value_preds_no_hs = remap_ids(all_value_preds_no_hs, config.id_no_hs_to_id_hs)
+    assert all_desc_global_yes_hs == all_desc_global_no_hs, f"Descriptions arrays are different // Training has been done shuffled"
 
+    print("2.4. Creating final predictions")
     flattened_predictions_yes_hs = extract_flattened_predictions(all_value_preds_yes_hs, all_pred_yes_hs)
     flattened_predictions_no_hs = extract_flattened_predictions(all_value_preds_no_hs, all_pred_no_hs)
 
     results_yes_hd = apply_thresholds_icd10_SYNC(flattened_predictions_yes_hs, config.icd10_thresholds["YES_HS"])
     results_no_hd = apply_thresholds_icd10_SYNC(flattened_predictions_no_hs, config.icd10_thresholds["NO_HS"])
 
-    final_results = [(all_pred_yes_hs[i] if yes[0] or not no[0] else all_pred_no_hs[i], yes) for i, (yes, no) in enumerate(zip(results_yes_hd, results_no_hd))]
+    final_results = [(all_desc_global_yes_hs[i], config.id2label_ICD10[0][all_pred_yes_hs[i]] if yes[0] else config.id2label_ICD10[0][all_pred_no_hs[i]] if no[0] else config.id2label_ICD10[0][all_pred_yes_hs[i]], yes if yes[0] else no if no[0] else yes) for i, (yes, no) in enumerate(zip(results_yes_hd, results_no_hd))]
 
-    return final_results
+    return (df_final_ner, df_final_ner_corrected), (df_data_full, df_data_diags, tmp), (entities_correction_decision), (final_results, results_yes_hd, results_no_hd, flattened_predictions_yes_hs, flattened_predictions_no_hs)
     
 
 def run_docx_to_jsons_genrative_sync(ctx: PipelineContext):
