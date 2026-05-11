@@ -91,6 +91,15 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--deterministic_use_llm_for_corrections",
+        type=bool,
+        required=False,
+        choices=[True, False],
+        default=False,
+        help="Si se usa el modo determinista, declarar si se quiere utilizar un LLM para posibles correcciones"
+    )
+
+    parser.add_argument(
         "--modo",
         type=str,
         required=True,
@@ -172,6 +181,7 @@ def main() -> None:
     )
     ctx = PipelineContext(
         ussage=args.ussage,
+        deterministic_use_llm_for_corrections=args.deterministic_use_llm_for_corrections,
         folder_and_archive_name=args.folder_and_archive_name,
         json_parse=args.json_parse,
         llm_config=cfg_llm,
