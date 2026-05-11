@@ -27,7 +27,7 @@ from sentence_transformers.util import cos_sim
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 
-from ..io.reader import load_schema_info, read_torch_checkpoint, read_parquet_file
+from ..data_io.reader import load_schema_info, read_torch_checkpoint, read_parquet_file
 from ..config import BASE_DIR
 from ..models import Any, PipelineContext, SpanDataset, SpanClassifier, ICD10Dataset, ICD10Predictor_HS_Head, ICD10Predictor_HS_CrossEntropyLoss, ICD10Predictor_NO_HS
 

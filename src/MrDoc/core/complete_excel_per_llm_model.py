@@ -3,7 +3,7 @@ from ..models import (
     JSONToXLSXConfig
 )
 
-from ..io.reader import (
+from ..data_io.reader import (
     Path,
     textwrap,
     defaultdict,
@@ -12,7 +12,7 @@ from ..io.reader import (
     read_json_diagnosticos,
     read_embeddings_pre_created
 )
-from ..io.writing import (
+from ..data_io.writing import (
     create_output_folder_name,
     write_excel_log,
     write_excel_final
