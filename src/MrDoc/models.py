@@ -73,15 +73,16 @@ class SpanClassifier(nn.Module):
         return logits
 
 class ICD10Dataset(Dataset):
-    def __init__(self, inputs, queries):
+    def __init__(self, inputs, queries, all_desc):
         self.inputs = inputs
         self.queries = queries
+        self.all_desc = all_desc
 
     def __len__(self):
         return len(self.inputs)
 
     def __getitem__(self, idx):
-        return self.inputs[idx], self.queries[idx]
+        return self.inputs[idx], self.queries[idx], self.all_desc[idx]
 
 class ICD10Predictor_HS_Head(nn.Module):
     def __init__(self, root, decoder_query_dim=1024):
@@ -408,6 +409,26 @@ class ICD10Predictor_HS_CrossEntropyLoss(nn.Module):
             return logits_cos, child_global, target_to_local
 
         return logits_cos, child_global, None
+    
+    def _defs_to_2d_tensor(self, defs):
+        if isinstance(defs, torch.Tensor):
+            if defs.dim() == 1:
+                defs = defs.unsqueeze(0)
+            elif defs.dim() != 2:
+                raise ValueError(f"defs tensor must have dim 1 or 2, got shape={tuple(defs.shape)}")
+            return defs
+
+        if isinstance(defs, (list, tuple)):
+            if len(defs) == 0:
+                raise ValueError("Empty definitions list.")
+            if isinstance(defs[0], torch.Tensor):
+                return torch.stack(defs, dim=0)
+            raise TypeError(f"defs elements must be tensors, got type={type(defs[0])}")
+
+        raise TypeError(f"Unsupported defs format: {type(defs)}")
+    
+    def _level_key(self, parent_idx):
+        return f"neg{abs(int(parent_idx))}" if int(parent_idx) < 0 else str(int(parent_idx))
 
     def forward(self):
         pass
