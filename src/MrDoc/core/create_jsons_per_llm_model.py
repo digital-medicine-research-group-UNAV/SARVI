@@ -191,18 +191,19 @@ def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
     df_final_ner = df_final_ner.rename(columns={"archivo_origen": "Original File"})[["Text"] + [col for label in out_labels for col in (f"All {label}", f"All {label} Token idx")] + ["Original File"]]
 
     # ------------------------------Correct NER------------------------------
-    print("1. -> 2. Fixing entities")
-    codiesp_train = read_parquet_file(ctx, "codiesp_train.parquet")
-    e3c_trian = read_parquet_file(ctx, "e3c_train.parquet")
+    if ctx.deterministic_use_llm_for_corrections:
+        print("1. -> 2. Fixing entities")
+        codiesp_train = read_parquet_file(ctx, "codiesp_train.parquet")
+        e3c_trian = read_parquet_file(ctx, "e3c_train.parquet")
 
-    random_clinentity = list(set(random.sample([s for arr in codiesp_train["All Description"].dropna() for s in arr], k=min(30, len([s for arr in codiesp_train["All Description"].dropna() for s in arr])))))
-    random_actor = list(set(random.sample([s for arr in e3c_trian["All ACTOR"].dropna() for s in arr], k=min(30, len([s for arr in e3c_trian["All ACTOR"].dropna() for s in arr])))))
-    random_timex3 = list(set(random.sample([s for arr in e3c_trian["All TIMEX3"].dropna() for s in arr], k=min(30, len([s for arr in e3c_trian["All TIMEX3"].dropna() for s in arr])))))
+        random_clinentity = list(set(random.sample([s for arr in codiesp_train["All Description"].dropna() for s in arr], k=min(30, len([s for arr in codiesp_train["All Description"].dropna() for s in arr])))))
+        random_actor = list(set(random.sample([s for arr in e3c_trian["All ACTOR"].dropna() for s in arr], k=min(30, len([s for arr in e3c_trian["All ACTOR"].dropna() for s in arr])))))
+        random_timex3 = list(set(random.sample([s for arr in e3c_trian["All TIMEX3"].dropna() for s in arr], k=min(30, len([s for arr in e3c_trian["All TIMEX3"].dropna() for s in arr])))))
 
-    config.prompt = config.prompt.format(random_clinentity=random_clinentity, random_actor=random_actor, random_timex3=random_timex3)
-    correct_entities_input = build_ner_json(df_final_ner, token_index_base=1)
-    entities_correction_decision = correct_entities_SYNC(config.prompt, config.llm, correct_entities_input, ctx.paths.docs_dir, ctx.json_parse)
-    df_final_ner_corrected = corrected_entities_to_df_SYNC(entities_correction_decision, dict_data)
+        config.prompt = config.prompt.format(random_clinentity=random_clinentity, random_actor=random_actor, random_timex3=random_timex3)
+        correct_entities_input = build_ner_json(df_final_ner, token_index_base=1)
+        entities_correction_decision = correct_entities_SYNC(config.prompt, config.llm, correct_entities_input, ctx.paths.docs_dir, ctx.json_parse)
+        df_final_ner_corrected = corrected_entities_to_df_SYNC(entities_correction_decision, dict_data)
 
     # ------------------------------CIE10------------------------------
     print("2.1. Creating ICD10 prediction data")

@@ -54,6 +54,7 @@ class JSONToXLSXConfig(BaseModel):
 class PipelineContext(BaseModel):
     paths: AppPaths
     ussage: str
+    deterministic_use_llm_for_corrections: bool
 
     # MUTABLES
     folder_and_archive_name: str
