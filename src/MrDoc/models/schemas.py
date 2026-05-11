@@ -55,6 +55,7 @@ class PipelineContext(BaseModel):
     paths: AppPaths
     ussage: str
     deterministic_use_llm_for_corrections: bool
+    device: str
 
     # MUTABLES
     folder_and_archive_name: str

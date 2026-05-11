@@ -170,12 +170,13 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     cfg_llm = LLMConfig(
         service=args.llm_service, 
         model=args.llm_model,
         lora_model=args.lora_model,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=device,
         num_threads=args.num_threads,
         num_interop_threads=args.num_interop_threads
     )
@@ -187,7 +188,8 @@ def main() -> None:
         llm_config=cfg_llm,
         MAX_CONCURRENCY=args.max_concurrency,
         paths=paths,
-        cie_10_version=args.cie_10_version
+        cie_10_version=args.cie_10_version,
+        device=device
     )
 
     run(ctx, args.tarea, args.ussage, args.modo, args.folder_and_archive_name)
