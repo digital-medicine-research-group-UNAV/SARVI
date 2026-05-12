@@ -3,6 +3,7 @@ import tqdm
 import torch
 import ollama
 import asyncio
+
 from peft import PeftModel
 from langchain_openai import ChatOpenAI
 from transformers import AutoTokenizer, AutoModelForCausalLM, Mxfp4Config
@@ -10,8 +11,12 @@ from vllm import LLM, SamplingParams
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.lora.request import LoRARequest
 
-from ...models.schemas import LLMConfig
-from ...data_io.reader import read_json_single
+from ...models.schemas import (
+    LLMConfig
+)
+from ...data_io.reader import (
+    read_json_single
+)
 
 #################################################################################################################
 class LLMTransformersWrapper:

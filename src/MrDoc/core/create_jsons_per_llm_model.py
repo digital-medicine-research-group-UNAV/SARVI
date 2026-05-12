@@ -1,4 +1,7 @@
+import tqdm
+import random
 import traceback
+import pandas as pd
 from natsort import natsorted
 
 from ..models.schemas import (
@@ -8,8 +11,7 @@ from ..models.schemas import (
 
 from ..data_io.reader import (
     textwrap,
-    cargar_docx_single,
-    cargar_docx_lista,
+    cargar_docx_single, cargar_docx_lista,
     read_json_single,
     read_excel,
     read_parquet_file
@@ -19,42 +21,52 @@ from ..data_io.writing import (
     write_json
 )
 
-from ..services.common.llm_loader import load_llm
-from ..services.common.common import (
-    tqdm,
-    ast,
-    pd,
-    device,
-    random,
+from ..services.common.llm_loader import (
+    load_llm
+)
+from ..services.common.tree_funcs import (
+    load_tree_hierarchical_module
+)
+from ..services.common.llm_funcs import (
+    prompts as prompts_total
+)
+from ..services.common.ner_funcs import(
     build_ner_json,
-    tokenizer_ner,
     model_ner,
-    merge_sentencepiece_words,
+    tokenizer_ner,
     initialize_span_ner_model,
+    id2label_ner,
+    prepara_data_from_ner_pred_to_icd_pred,
+    corrected_entities_to_df,
+)
+from ..services.common.icd_pred_funcs import(
     initialize_icd10_hs_head_model,
     initialize_icd10_hs_prediction_model,
     initialize_icd10_no_hs_head_model,
-    id2label_ner,
-    label2id_ner,
-    remap_ids,
     extract_flattened_predictions,
-    prompts as prompts_total
 )
-from ..services.sync_functions.sync_funcs import (
-    load_tree_hierarchical_module,
+from ..services.common.utils.icd_preds_utils import (
+    remap_ids
+)
+
+from ..services.sync_funcs.llm_funcs import (
     procesar_docx as procesar_docx_SYNC,
+    correct_entities as correct_entities_SYNC,
+)
+from ..services.sync_funcs.ner_funcs import (
     prepare_data as prepare_data_SYNC,
     construct_loaders_ner as construct_loaders_ner_SYNC,
     run_ner_model as run_ner_model_SYNC,
     update_df_with_final_pred_entities as update_df_with_final_pred_entities_SYNC,
+)
+from ..services.sync_funcs.icd_pred_funcs import(
     construct_loaders_icd10 as construct_loaders_icd10_SYNC,
     run_icd10_hs_model as run_icd10_hs_model_SYNC,
     run_icd10_no_hs_model as run_icd10_no_hs_model_SYNC, 
     apply_thresholds_icd10 as apply_thresholds_icd10_SYNC,
-    correct_entities as correct_entities_SYNC,
-    corrected_entities_to_df as corrected_entities_to_df_SYNC
 )
-from ..services.async_functions.async_funcs import (
+
+from ..services.async_funcs.llm_funcs import (
     asyncio,
     procesar_docx as procesar_docx_ASYNC
 )
@@ -98,7 +110,10 @@ def initialize_variables(ctx: PipelineContext):
         id_no_hs_to_id_hs = None
         icd10_thresholds = None
     else:
-        llm = load_llm(ctx.llm_config)
+        if ctx.deterministic_use_llm_for_corrections:
+            llm = load_llm(ctx.llm_config)
+        else:
+            llm = None
         prompt = textwrap.dedent(prompts_total["correct_entities"])
         modelo_ner = [initialize_span_ner_model(ctx, "NER_checkpoint.pt"), initialize_span_ner_model(ctx, "NER_checkpoint_FT.pt")]
         node_list = load_tree_hierarchical_module(df_reference)
@@ -144,18 +159,18 @@ def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
     dict_data = cargar_docx_lista(ctx.paths.data_input / ctx.folder_and_archive_name)
     df_data = pd.DataFrame(list(dict_data.items()), columns=["archivo_origen", "Text"])
 
-    df_data_prepared = prepare_data_SYNC(df_data, padding=False, tokenizer=tokenizer_ner, model=model_ner, device=device)
+    df_data_prepared = prepare_data_SYNC(df_data, padding=False, tokenizer=tokenizer_ner, model=model_ner, device=ctx.device)
     df_data_full, data_loader_full = construct_loaders_ner_SYNC(data=df_data_prepared, tokenizer=tokenizer_ner)
     df_data_diags, data_loader_diags = construct_loaders_ner_SYNC(data=df_data_prepared, tokenizer=tokenizer_ner)
 
     print("1.2. Running NER model // FULL")
-    all_pred_full, all_value_preds_full = run_ner_model_SYNC(config.modelo_ner[0], data_loader=data_loader_full, device=device)
+    all_pred_full, all_value_preds_full = run_ner_model_SYNC(config.modelo_ner[0], data_loader=data_loader_full, device=ctx.device)
     df_data_full["pred_id"] = all_pred_full
     df_data_full["pred_label"] = df_data_full["pred_id"].map(id2label_ner)
     df_data_full = update_df_with_final_pred_entities_SYNC(df_data_full)
 
     print("1.3. Running NER model // DIAGS")
-    all_pred_diags, all_value_preds_diags = run_ner_model_SYNC(config.modelo_ner[1], data_loader=data_loader_diags, device=device)
+    all_pred_diags, all_value_preds_diags = run_ner_model_SYNC(config.modelo_ner[1], data_loader=data_loader_diags, device=ctx.device)
     df_data_diags["pred_id"] = all_pred_diags
     df_data_diags["pred_label"] = df_data_diags["pred_id"].map(id2label_ner)
     df_data_diags = update_df_with_final_pred_entities_SYNC(df_data_diags)
@@ -170,25 +185,7 @@ def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
     df_final_ner = df_final_ner[['File', 'Tokens', 'Decoded span', 'Token idx', 'Text instance', 'pred_id', 'pred_label']]
 
     print("1. -> 2. Transforming data to predict ICD10")
-    ner_labels = [label for label in dict.fromkeys(list(id2label_ner.values()) + list(label2id_ner.keys())) if label != "O"]
-    out_labels = list(dict.fromkeys(["Description" if label == "CLINENTITY" else label for label in ner_labels]))
-
-    tmp = df_final_ner.copy()
-    tmp["ner_label"] = tmp["pred_label"].where(tmp["pred_label"].isin(ner_labels), tmp["pred_id"].map({v: k for k, v in label2id_ner.items()}))
-    tmp = tmp[tmp["ner_label"].isin(ner_labels)].copy()
-    tmp["Decoded span"] = tmp["Decoded span"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
-    tmp["Token idx"] = tmp["Token idx"].apply(lambda x: tuple(ast.literal_eval(x) if isinstance(x, str) else x))
-    tmp["entity"] = tmp["Decoded span"].apply(lambda toks: " ".join(merge_sentencepiece_words(toks)))
-    tmp["out_label"] = tmp["ner_label"].replace({"CLINENTITY": "Description"})
-    tmp = tmp.drop_duplicates(subset=["File", "out_label", "Token idx", "entity"])
-
-    entities_by_file = tmp.groupby(["File", "out_label"]).agg(entity=("entity", list), token_idx=("Token idx", list)).reset_index()
-    entities_by_file = entities_by_file.pivot(index="File", columns="out_label", values=["entity", "token_idx"]).reset_index()
-    entities_by_file.columns = ["File"] + [f"All {label}" if kind == "entity" else f"All {label} Token idx" for kind, label in entities_by_file.columns[1:]]
-
-    df_final_ner = df_data[["archivo_origen", "Text"]].merge(entities_by_file, left_on="archivo_origen", right_on="File", how="left")
-    for col in [col for label in out_labels for col in (f"All {label}", f"All {label} Token idx")]: df_final_ner[col] = df_final_ner[col].apply(lambda x: x if isinstance(x, list) else [])
-    df_final_ner = df_final_ner.rename(columns={"archivo_origen": "Original File"})[["Text"] + [col for label in out_labels for col in (f"All {label}", f"All {label} Token idx")] + ["Original File"]]
+    df_final_ner = prepara_data_from_ner_pred_to_icd_pred(df_data, df_final_ner)
 
     # ------------------------------Correct NER------------------------------
     if ctx.deterministic_use_llm_for_corrections:
@@ -203,11 +200,11 @@ def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
         config.prompt = config.prompt.format(random_clinentity=random_clinentity, random_actor=random_actor, random_timex3=random_timex3)
         correct_entities_input = build_ner_json(df_final_ner, token_index_base=1)
         entities_correction_decision = correct_entities_SYNC(config.prompt, config.llm, correct_entities_input, ctx.paths.docs_dir, ctx.json_parse)
-        df_final_ner_corrected = corrected_entities_to_df_SYNC(entities_correction_decision, dict_data)
+        df_final_ner = corrected_entities_to_df(entities_correction_decision, dict_data)
 
     # ------------------------------CIE10------------------------------
     print("2.1. Creating ICD10 prediction data")
-    data_loader = construct_loaders_icd10_SYNC(df_final_ner_corrected)
+    data_loader = construct_loaders_icd10_SYNC(df_final_ner)
 
     print("2.2. Running ICD10 prediction data // YES HS")
     all_pred_yes_hs, all_value_preds_yes_hs, all_desc_global_yes_hs = run_icd10_hs_model_SYNC(config.modelo_icd10_head[0], config.modelo_icd10_prediction[0], data_loader)
@@ -227,7 +224,8 @@ def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
 
     final_results = [(all_desc_global_yes_hs[i], config.id2label_ICD10[0][all_pred_yes_hs[i]] if yes[0] else config.id2label_ICD10[0][all_pred_no_hs[i]] if no[0] else config.id2label_ICD10[0][all_pred_yes_hs[i]], yes if yes[0] else no if no[0] else yes) for i, (yes, no) in enumerate(zip(results_yes_hd, results_no_hd))]
 
-    return (df_final_ner, df_final_ner_corrected), (df_data_full, df_data_diags, tmp), (entities_correction_decision), (final_results, results_yes_hd, results_no_hd, flattened_predictions_yes_hs, flattened_predictions_no_hs)
+    return final_results
+    # return (df_final_ner, df_final_ner_corrected), (df_data_full, df_data_diags, tmp), (entities_correction_decision), (final_results, results_yes_hd, results_no_hd, flattened_predictions_yes_hs, flattened_predictions_no_hs)
     
 
 def run_docx_to_jsons_genrative_sync(ctx: PipelineContext):

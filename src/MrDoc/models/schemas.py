@@ -5,8 +5,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Any
 
-from .neural_networks import ICD10Predictor_HS_Head, ICD10Predictor_NO_HS, ICD10Predictor_HS_CrossEntropyLoss
-from .datasets import SpanClassifier
+from .neural_networks import ICD10Predictor_HS_Head, ICD10Predictor_NO_HS, ICD10Predictor_HS_CrossEntropyLoss, SpanClassifier
 from ..config import AppPaths
 
 class DisabledOptionError(Exception):
@@ -54,7 +53,7 @@ class JSONToXLSXConfig(BaseModel):
 class PipelineContext(BaseModel):
     paths: AppPaths
     ussage: str
-    deterministic_use_llm_for_corrections: bool
+    deterministic_use_llm_for_corrections: bool = False
     device: str
 
     # MUTABLES
