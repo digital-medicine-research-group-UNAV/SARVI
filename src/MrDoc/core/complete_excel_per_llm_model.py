@@ -1,10 +1,13 @@
+import torch
+import pandas as pd
+from pathlib import Path
+
 from ..models.schemas import (
     PipelineContext,
     JSONToXLSXConfig
 )
 
 from ..data_io.reader import (
-    Path,
     textwrap,
     defaultdict,
     read_excel,
@@ -18,23 +21,26 @@ from ..data_io.writing import (
     write_excel_final
 )
 
-from ..services.common.llm_loader import load_llm
-from ..services.common.common import (
-    pd,
-    torch,
-    model,
+from ..services.common.llm_loader import (
+    load_llm
+)
+from ..services.common.llm_funcs import (
     prompts as prompts_total,
     procesar_json_diagnosticos,
     clean_df_obtained_with_llm,
     completar_df_extra_data_for_analysis
 )
-from ..services.sync_functions.sync_funcs import (
+from ..services.common.utils.json_utils import (
+    model
+)
+
+from ..services.sync_funcs.llm_funcs import (
     completar_df_predicted_nearest_text_only as completar_df_predicted_nearest_text_only_SYNC,
     asistente_seleccionador_cie10 as asistente_seleccionador_cie10_SYNC,
     asistente_juzgador_cie10 as asistente_juzgador_cie10_SYNC,
     asistente_seleccionador_tratamiento_falsos_cie10 as asistente_seleccionador_tratamiento_falsos_cie10_SYNC
 )
-from ..services.async_functions.async_funcs import (
+from ..services.async_funcs.llm_funcs import (
     asyncio,
     completar_df_predicted_nearest_text_only as completar_df_predicted_nearest_text_only_ASYNC,
     asistente_seleccionador_cie10 as asistente_seleccionador_cie10_ASYNC,

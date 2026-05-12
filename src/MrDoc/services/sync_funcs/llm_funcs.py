@@ -1,57 +1,166 @@
 # 💸 Agente Mr.Doc: OpenAI API
 # 💸 = correr el código tiene coste
 
+import re
+import time
 import json
-import asyncio
+import torch
 import traceback
-from ftfy import fix_text
-from langchain_core.messages import SystemMessage, HumanMessage
+import pandas as pd
 
-from ..common.common import (
-    re,
-    pd,
-    Path,
-    tqdm,
-    json,
-    torch,
-    cos_sim,
-    SentenceTransformer,
-    validate_complete_objects_from_truncated_output,
-    clean_objects_with_schema,
-    clean_single_cie10_value,
-    find_CIE10_similars,
-    validate_json_created,
-    cie10_judger_tokenizer,
-    cie10_judger_model,
-    device
+from pathlib import Path
+from ftfy import fix_text
+from tqdm.auto import tqdm
+from sentence_transformers.util import cos_sim
+from sentence_transformers import SentenceTransformer
+from langchain_core.messages import SystemMessage, HumanMessage
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+from ..common.llm_funcs import (
+    clean_single_cie10_value, find_CIE10_similars, device
 )
 
-#################################################################################################################
-async def retry_async(fn, *args, retries=3, delay=1, **kwargs):
-    for attempt in range(retries):
-        try:
-            return await fn(*args, **kwargs)
-        except Exception as e:
-            print(f"⚠️ Error en {fn.__name__} (intento {attempt + 1}/{retries}): {e}")
-            if attempt == retries - 1:
-                raise
-            await asyncio.sleep(delay)
-#################################################################################################################
+from ..common.ner_funcs import(
+    get_missing_entities
+)
 
-async def procesar_docx(informe_texto: str, report: Path, prompt: str, llm, json_parse: bool, docs_dir: Path, semaforo: asyncio.Semaphore):
+from ..common.utils.json_utils import (
+    validate_json_created, validate_complete_objects_from_truncated_output, clean_objects_with_schema
+)
+
+###
+cie10_judger_tokenizer = AutoTokenizer.from_pretrained("JulenRM/RigoBERTa-Clinical_CIE10Judger")
+cie10_judger_model = AutoModelForSequenceClassification.from_pretrained("JulenRM/RigoBERTa-Clinical_CIE10Judger").to(device)
+###
+
+def correct_entities(prompt: str, llm, correct_entities_input: dict, docs_dir: Path, json_parse: bool = False, max_attempts: int = 40, max_entities_per_call: int = 15):
+
+    def chunk_list(items: list, chunk_size: int = 30):
+        for i in range(0, len(items), chunk_size):
+            yield items[i:i + chunk_size]
+
+    def make_keep_answer(file_id: str, entities: list[dict]) -> dict:
+        return {
+            "data": [
+                {
+                    "file_id": file_id,
+                    "entities": [
+                        {
+                            "ent_id": ent["entity"]["ent_id"],
+                            "original_text": ent["entity"]["text"],
+                            "original_start": ent["entity"]["start"],
+                            "original_end": ent["entity"]["end"],
+                            "original_label": ent["target_label"],
+                            "decision": "KEEP",
+                            "corrected_text": ent["entity"]["text"],
+                            "corrected_start": ent["entity"]["start"],
+                            "corrected_end": ent["entity"]["end"],
+                            "corrected_label": ent["target_label"],
+                        }
+                        for ent in entities
+                    ],
+                }
+            ]
+        }
+        
+    answer_global = {"data": []}
+    schema_path = docs_dir / "esquema_correcion_entidades.json"
+
+    for i,data in tqdm(enumerate(correct_entities_input["data"]), desc="Correcting entities", total=len(correct_entities_input["data"])):
+        original_data = data
+        accumulated_answer = None
+        entities_to_process = original_data["entities"]
+
+        for attempt in range(1, max_attempts + 1):
+            start_time = time.perf_counter()
+
+            try:
+                for entities_chunk in chunk_list(entities_to_process, max_entities_per_call):
+                    current_input = {**original_data, "entities": entities_chunk}
+
+                    messages = [prompt, str({"data": current_input})]
+                    raw_answer = llm.invoke(messages, json_schema=schema_path)
+
+                    if json_parse:
+                        m = re.findall(r"```(?:json)?\s*(.*?)\s*```", raw_answer, re.DOTALL | re.IGNORECASE)
+
+                        json_texto = (m[-1] if m else raw_answer).strip()
+                        objetos = validate_complete_objects_from_truncated_output(json_texto)
+                        objetos_limpios = clean_objects_with_schema(objetos, schema_path)
+
+                        if not objetos_limpios:
+                            raise ValueError("No valid objects found after schema cleaning.")
+
+                        answer = {"data": objetos_limpios}
+
+                    else:
+                        answer = json.loads(raw_answer)
+
+                    if accumulated_answer is None:
+                        accumulated_answer = answer
+                    else:
+                        accumulated_answer["data"][0]["entities"].extend(answer["data"][0]["entities"])
+
+                corrected_entities = accumulated_answer["data"][0]["entities"]
+ 
+                missing_entities = get_missing_entities(original_data["entities"], corrected_entities, original_data["text"])
+
+                elapsed = time.perf_counter() - start_time
+
+                if not missing_entities:
+                    tqdm.write(f"Attempt {i} / {attempt} succeeded in {elapsed:.2f}s")
+                    break
+
+                tqdm.write(f"Attempt c{attempt} partially succeeded in {elapsed:.2f}s. Missing entities: {len(missing_entities)}")
+
+                entities_to_process = missing_entities
+
+                if attempt == max_attempts:
+                    fallback_answer = make_keep_answer(file_id=original_data["file_id"], entities=missing_entities)
+
+                    if accumulated_answer is None:
+                        accumulated_answer = fallback_answer
+                    else:
+                        accumulated_answer["data"][0]["entities"].extend(fallback_answer["data"][0]["entities"])
+
+                    tqdm.write(f"Max attempts reached for {i} / {original_data['file_id']}. Added {len(missing_entities)} missing entities as KEEP.")
+
+
+            except Exception as e:
+                elapsed = time.perf_counter() - start_time
+                tqdm.write(f"Attempt {i} / {attempt} failed in {elapsed:.2f}s: {e}")
+
+                if attempt == max_attempts:
+                    fallback_answer = make_keep_answer(file_id=original_data["file_id"], entities=missing_entities)
+
+                    if accumulated_answer is None:
+                        accumulated_answer = fallback_answer
+                    else:
+                        accumulated_answer["data"][0]["entities"].extend(fallback_answer["data"][0]["entities"])
+
+                    tqdm.write(f"Max attempts reached for {i} / {original_data['file_id']}. Added {len(missing_entities)} missing entities as KEEP.")
+
+        if accumulated_answer is None:
+            raise ValueError("No valid answer was produced by the LLM.")
+
+        answer_global["data"].append(accumulated_answer["data"][0])
+
+    return answer_global
+
+def procesar_docx(informe_texto: str, report: Path, prompt: str, llm, json_parse: bool, docs_dir: Path):
     """
     Procesa un informe DOCX y guarda el resultado en un JSON.
     Versión sincrónica.
     """
-    async with semaforo:
-        respuesta_llm = await procesar_informe(informe_texto, prompt, llm, docs_dir, json_parse)
+    respuesta_llm = procesar_informe(informe_texto, prompt, llm, docs_dir, json_parse)
 
-        if not validate_json_created(respuesta_llm, docs_dir / "esquema_diagnosticos.json"):
-            raise Exception(f"El JSON creado del documento {report.stem} no sigue el esquema indicado")
-        
-        return respuesta_llm
+    if not validate_json_created(respuesta_llm, docs_dir / "esquema_diagnosticos.json"):
+        raise Exception(f"El JSON creado del documento {report.stem} no sigue el esquema indicado")
+    
+    return respuesta_llm
 
-async def procesar_informe(informe_raw: str, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
+
+def procesar_informe(informe_raw: str, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
     """
     💸💸💸
 
@@ -75,11 +184,13 @@ async def procesar_informe(informe_raw: str, prompt: str, llm, docs_dir: Path, j
         `respuesta_llm`: dict
             - Respuesta del LLM directamente en formato dict/json
     """
-    messages = [SystemMessage(content=prompt),
-                HumanMessage(content=informe_raw)]
+    if json_parse:
+        messages = [prompt, informe_raw]
+    else:
+        messages = [SystemMessage(content=prompt),
+                    HumanMessage(content=informe_raw)]
 
-    answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_diagnosticos.json")
-    answer = answer.content
+    answer = llm.invoke(messages, json_schema=docs_dir / "esquema_diagnosticos.json")
 
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)
@@ -95,9 +206,8 @@ async def procesar_informe(informe_raw: str, prompt: str, llm, docs_dir: Path, j
         answer = json.loads(answer)
 
     return answer
-    
 
-async def seleccionar_CIE10_lista(enfermedad: str, CIE10_dict: dict, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
+def seleccionar_CIE10_lista(enfermedad: str, CIE10_dict: dict, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
     """
     💸💸💸
 
@@ -122,19 +232,30 @@ async def seleccionar_CIE10_lista(enfermedad: str, CIE10_dict: dict, prompt: str
         `respuesta_llm`: dict
             - Respuesta del LLM directamente en formato dict/json
     """
-    messages = [SystemMessage(content=prompt),
-                HumanMessage(content=f"""
-                                    ```json
-                                    {{
-                                        "enfermedad": "{enfermedad}"
-                                        "dict_codigos_CIE10": {json.dumps(CIE10_dict, ensure_ascii=False)}
-                                    }}
-                                    ```
-                                    """)]
+    if json_parse:
+        messages = [prompt,
+                    f"""
+                        ```json
+                        {{
+                            "enfermedad": "{enfermedad}"
+                            "dict_codigos_CIE10": {json.dumps(CIE10_dict, ensure_ascii=False)}
+                        }}
+                        ```
+                    """]
 
-    answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_selected_and_decider.json")
-    answer = answer.content
+    else:
+        messages = [SystemMessage(content=prompt),
+                    HumanMessage(content=f"""
+                                            ```json
+                                            {{
+                                                "enfermedad": "{enfermedad}"
+                                                "dict_codigos_CIE10": {json.dumps(CIE10_dict, ensure_ascii=False)}
+                                            }}
+                                            ```
+                                        """)]
 
+    answer = llm.invoke(messages, json_schema=docs_dir / "esquema_selected_and_decider.json")
+    
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)
         json_texto = (m[-1] if m else answer).strip()
@@ -142,15 +263,16 @@ async def seleccionar_CIE10_lista(enfermedad: str, CIE10_dict: dict, prompt: str
         #     answer = json.loads(json_texto)
         # except Exception as e:
         answer = validate_complete_objects_from_truncated_output(json_texto)
-        answer = clean_objects_with_schema(answer, docs_dir / "esquema_selected_and_decider.json")[0]
+        answer = clean_objects_with_schema(answer, docs_dir / "esquema_selected_and_decider.json")
+        answer = answer[0]
     else:
         answer = json.loads(answer.content)
-
+    
     return answer
 
 
-# async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_extraido: str, contexto: str, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
-async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_extraido: str, prompt: str, docs_dir: Path, json_parse: bool = False) -> dict:
+# def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_extraido: str, contexto: str, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
+def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_extraido: str, prompt: str, docs_dir: Path, json_parse: bool = False) -> dict:
     """
     💸💸💸
 
@@ -179,20 +301,33 @@ async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_e
         `respuesta_llm`: dict
             - Respuesta del LLM directamente en formato dict/json
     """
-    # messages = [SystemMessage(content=prompt),
-    #             HumanMessage(content=f"""
-    #                                 ```json
-    #                                 {{
-    #                                     "CIE10_codigo": "{CIE10_codigo}"
-    #                                     "CIE10_descripción": "{CIE10_descripción}"
-    #                                     "diagnostico_extraido": "{diagnostico_extraido}"
-    #                                     "contexto": "{contexto}"
-    #                                 }}
-    #                                 ```
-    #                                 """)]
+    # if json_parse:
+    #     messages = [prompt,
+    #                 f"""
+    #                     ```json
+    #                     {{
+    #                         "CIE10_codigo": "{CIE10_codigo}"
+    #                         "CIE10_descripción": "{CIE10_descripción}"
+    #                         "diagnostico_extraido": "{diagnostico_extraido}"
+    #                         "contexto": "{contexto}"
+    #                     }}
+    #                     ```
+    #                 """]
 
-    # answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_juzgar.json")
-    # answer = answer.content
+    # else:
+    #     messages = [SystemMessage(content=prompt),
+    #                 HumanMessage(content=f"""
+    #                                         ```json
+    #                                         {{
+    #                                             "CIE10_codigo": "{CIE10_codigo}"
+    #                                             "CIE10_descripción": "{CIE10_descripción}"
+    #                                             "diagnostico_extraido": "{diagnostico_extraido}"
+    #                                             "contexto": "{contexto}"
+    #                                         }}
+    #                                         ```
+    #                                     """)]
+
+    # answer = llm.invoke(messages, json_schema=docs_dir / "esquema_juzgar.json")
 
     prompt = f"[REF]{diagnostico_extraido.lower()}[CODE]{CIE10_codigo.upper()}[DESC]{CIE10_descripción.lower()}"
     inputs = cie10_judger_tokenizer(prompt, return_tensors="pt", truncation=True, padding="max_length", max_length=256).to(device)
@@ -204,7 +339,7 @@ async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_e
     answer = f"""```json
     {json.dumps({"resultado": True if prediction==1 else False})}
     ```"""
-
+    
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)
         json_texto = (m[-1] if m else answer).strip()
@@ -219,7 +354,7 @@ async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_e
     return answer
 
 
-async def decidir_CIE10(diagnostico_extraido: str, contexto: str, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
+def decidir_CIE10(diagnostico_extraido: str, contexto: str, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
     """
     💸💸💸
 
@@ -244,18 +379,29 @@ async def decidir_CIE10(diagnostico_extraido: str, contexto: str, prompt: str, l
         `respuesta_llm`: dict
             - Respuesta del LLM directamente en formato dict/json
     """
-    messages = [SystemMessage(content=prompt),
-                HumanMessage(content=f"""
-                                    ```json
-                                    {{
-                                        "diagnostico_extraido": "{diagnostico_extraido}"
-                                        "contexto": "{contexto}"
-                                    }}
-                                    ```
-                                    """)]
+    if json_parse:
+        messages = [prompt,
+                    f"""
+                        ```json
+                        {{
+                            "diagnostico_extraido": "{diagnostico_extraido}"
+                            "contexto": "{contexto}"
+                        }}
+                        ```
+                    """]
 
-    answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_selected_and_decider.json")
-    answer = answer.content
+    else:
+        messages = [SystemMessage(content=prompt),
+                    HumanMessage(content=f"""
+                                            ```json
+                                            {{
+                                                "diagnostico_extraido": "{diagnostico_extraido}"
+                                                "contexto": "{contexto}"
+                                            }}
+                                            ```
+                                        """)]
+
+    answer = llm.invoke(messages, json_schema=docs_dir / "esquema_selected_and_decider.json")
     
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)
@@ -271,7 +417,7 @@ async def decidir_CIE10(diagnostico_extraido: str, contexto: str, prompt: str, l
     return answer
 
 
-async def completar_df_predicted_nearest_text_only(df_predicted: pd.DataFrame, df_reference: pd.DataFrame, df_nearest_embeddings: torch.Tensor, df_predicted_embeddings: torch.Tensor, semaforo: asyncio.Semaphore, add_semantic_similarity: bool = False) -> pd.DataFrame:
+def completar_df_predicted_nearest_text_only(df_predicted: pd.DataFrame, df_reference: pd.DataFrame, df_nearest_embeddings: torch.Tensor, df_predicted_embeddings: torch.Tensor, add_semantic_similarity: bool = False) -> pd.DataFrame:
     """
     Función que se encarga de averiguar cual es la enfermedad más cercana a la obtenida mediante el LLM anteriormente. Realiza una similaridad semántica de embeddings entre lo predicho y todas las descripciones reales de referencia. Aquella más similar es la que se añade al DataFrame respuesta.
 
@@ -289,8 +435,6 @@ async def completar_df_predicted_nearest_text_only(df_predicted: pd.DataFrame, d
             - Embeddings ya procesados anteriormente. Se trata de cada una de las descripciones de enfermedades obtenidas anteriormente por un LLM
         `df_predicted_embeddings`: torch.Tensor
             - Embeddings ya procesados anteriormente. Se trata de cada una de las descripciones de enfermedades reales en los códigos CIE10
-        `semaforo`: asyncio.Semaphore
-            - Semaforo para poder hacer toda la actividad de forma asincrona
         `add_semantic_similarity`: bool
             - Booleano para saber si se quiere añadir el valor de similitud semántica obtenido
 
@@ -304,29 +448,23 @@ async def completar_df_predicted_nearest_text_only(df_predicted: pd.DataFrame, d
 
     resultados = []
 
-    async def procesar_fila(i: int, max_id: torch.Tensor, max_val: torch.Tensor):
-        async with semaforo:
-            resultado = {"idx": i, "diagnostico_nearest": df_reference.loc[int(max_id), "Descripción"], "CIE10_nearest": df_reference.loc[int(max_id), "Código"]}
-            if add_semantic_similarity:
-                resultado["similarity_predicted_nearest"] = float(max_val)
-            resultados.append(resultado)
-
-    tareas = [procesar_fila(i, max_id, max_val) for i, (max_id, max_val) in enumerate(zip(max_idx, max_vals))]
-
-    for future in tqdm(asyncio.as_completed(tareas), total=len(tareas), desc="Completando el DF (nearest)", unit="diagnostico"):
-        await future
+    for i, (max_id, max_val) in tqdm(enumerate(zip(max_idx, max_vals)), total=len(max_idx), desc="Completando el DF (nearest)", unit="diagnostico"):
+        resultado = {"idx": i, "diagnostico_nearest": df_reference.loc[int(max_id), "Descripción"], "CIE10_nearest": df_reference.loc[int(max_id), "Código"]}
+        if add_semantic_similarity:
+            resultado["similarity_predicted_nearest"] = float(max_val)
+        resultados.append(resultado)
 
     for r in resultados:
         i = r.pop("idx")
         for col, val in r.items():
             df_final.loc[i, col] = val
-
+    
     df_final = df_final.reset_index(drop=True)
 
     return df_final
 
 
-async def asistente_seleccionador_cie10(df_final: pd.DataFrame, CIE10_full_list: list, df_reference: pd.DataFrame, prompt_CIE10_selector: str, llm, docs_dir: Path, semaforo: asyncio.Semaphore, find_CIE10_similars_level: int = 0, model: SentenceTransformer = None, add_semantic_similarity: bool = False, json_parse: bool = False, tratamiento_fallos: bool = False) -> pd.DataFrame:
+def asistente_seleccionador_cie10(df_final: pd.DataFrame, CIE10_full_list: list, df_reference: pd.DataFrame, prompt_CIE10_selector: str, llm, docs_dir: Path, find_CIE10_similars_level: int = 0, model: SentenceTransformer = None, add_semantic_similarity: bool = False, json_parse: bool = False, tratamiento_fallos: bool = False) -> pd.DataFrame:
     """
     Función que permite que el asistene evaluador lleve a cabo su tarea. Se realizan una serie de pasos para cada enfermedad:
 
@@ -350,8 +488,6 @@ async def asistente_seleccionador_cie10(df_final: pd.DataFrame, CIE10_full_list:
             - Prompt para que el asistente evaluador pueda saber como realizar su trabajo
         `llm`
             - Objeto LLM mediante el cual poder hacer las llamadas
-        `semaforo`: asyncio.Semaphore
-            - Semaforo para poder hacer toda la actividad de forma asincrona
         `find_CIE10_similars_level`: int
             - Número entero que indica sobre que nivel realizar la búsqueda de códigos CIE10 similares. Por defecto (`cie10_similar_level` = 0) dicta que lo anterior al punto es fijo. Valores postivos aumentan lo fijado por la derecha del punto y valores negativos reducen lo fijado por la izquierda del punto
             - Investigar la función `find_CIE10_similars` para más información
@@ -381,45 +517,44 @@ async def asistente_seleccionador_cie10(df_final: pd.DataFrame, CIE10_full_list:
     resultados = []
     failed = []
 
-    async def procesar_fila(i: int, find_CIE10_similars_level: int):
+    for i in tqdm(range(len(df_final)), total=len(df_final), desc=desc, unit="diagnostico"):
         if (tratamiento_fallos and not df_final.loc[i, "tree_5"]) or (not tratamiento_fallos):
             max_retries = 5
             for attempt in range(1, max_retries + 1):
                 try:
-                    async with semaforo:
-                        aux = find_CIE10_similars_level
-                        # preparación (similaridades)
-                        CIE10_sim_predicted = find_CIE10_similars(df_final.loc[i, f"CIE10_predicted{sufijo}"], CIE10_full_list, level=find_CIE10_similars_level)
-                        CIE10_sim_nearest = find_CIE10_similars(df_final.loc[i, "CIE10_nearest"], CIE10_full_list, level=find_CIE10_similars_level)
+                    aux = find_CIE10_similars_level
+                    # preparación (similaridades)
+                    CIE10_sim_predicted = find_CIE10_similars(df_final.loc[i, f"CIE10_predicted{sufijo}"], CIE10_full_list, level=find_CIE10_similars_level)
+                    CIE10_sim_nearest = find_CIE10_similars(df_final.loc[i, "CIE10_nearest"], CIE10_full_list, level=find_CIE10_similars_level)
+                    CIE10_sim = list(set(CIE10_sim_predicted + CIE10_sim_nearest))
+                    while(len(CIE10_sim) > 70 and aux < 8):
+                        aux += 1
+                        CIE10_sim_predicted = find_CIE10_similars(df_final.loc[i, f"CIE10_predicted{sufijo}"], CIE10_full_list, level=aux)
+                        CIE10_sim_nearest = find_CIE10_similars(df_final.loc[i, "CIE10_nearest"], CIE10_full_list, level=aux)
                         CIE10_sim = list(set(CIE10_sim_predicted + CIE10_sim_nearest))
-                        while(len(CIE10_sim) > 100 and aux < 8):
-                            aux += 1
-                            CIE10_sim_predicted = find_CIE10_similars(df_final.loc[i, f"CIE10_predicted{sufijo}"], CIE10_full_list, level=find_CIE10_similars_level)
-                            CIE10_sim_nearest = find_CIE10_similars(df_final.loc[i, "CIE10_nearest"], CIE10_full_list, level=find_CIE10_similars_level)
-                            CIE10_sim = list(set(CIE10_sim_predicted + CIE10_sim_nearest))
-                        CIE10_sim_dict = df_reference[df_reference["Código"].isin(CIE10_sim)].set_index("Código")["Descripción"].to_dict()
+                    CIE10_sim_dict = df_reference[df_reference["Código"].isin(CIE10_sim)].set_index("Código")["Descripción"].to_dict()
 
-                        # llamada al LLM
-                        if (aux < 8):
-                            max_retries = 5
-                            for attempt in range(1, max_retries + 1):
-                                try:
-                                    CIE10_final = await seleccionar_CIE10_lista(df_final.loc[i, "diagnostico_predicted"], CIE10_sim_dict, prompt_CIE10_selector, llm, docs_dir, json_parse)
-                                    if not validate_json_created(CIE10_final, docs_dir / "esquema_selected_and_decider.json"):
-                                        raise Exception(f"El JSON creado del documento para la fila {i} no sigue el esquema indicado")
-                                    break
-                                except Exception as e:
-                                    print(f"⚠️ Error al seleccionar (LLM) la fila {i}: {e!r}")
-                                    traceback.print_exc()
-                                    if attempt < max_retries:
-                                        print("↻ Reintentando...")
-                                    else:
-                                        print(f"❌ Falló definitivamente al seleccionar (LLM) la fila {i}\n")
-                            
-                        else:
-                            CIE10_final = {"CIE10": df_final.loc[i, "CIE10_nearest"]}
+                    # llamada al LLM
+                    if (aux < 8):
+                        max_retries = 5
+                        for attempt in range(1, max_retries + 1):
+                            try:
+                                CIE10_final = seleccionar_CIE10_lista(df_final.loc[i, "diagnostico_predicted"], CIE10_sim_dict, prompt_CIE10_selector, llm, docs_dir, json_parse)
+                                if not validate_json_created(CIE10_final, docs_dir / "esquema_selected_and_decider.json"):
+                                    raise Exception(f"El JSON creado del documento para la fila {i} no sigue el esquema indicado")
+                                break
+                            except Exception as e:
+                                print(f"⚠️ Error al seleccionar (LLM) la fila {i}: {e!r}")
+                                traceback.print_exc()
+                                if attempt < max_retries:
+                                    print("↻ Reintentando...")
+                                else:
+                                    print(f"❌ Falló definitivamente al seleccionar (LLM) la fila {i}\n")
+                        
+                    else:
+                        CIE10_final = {"CIE10": df_final.loc[i, "CIE10_nearest"]}
 
-                    # calculamos embeddings fuera del semáforo
+                    # calculamos embeddings
                     similarity_val = None
                     if add_semantic_similarity and model is not None:
                         emb1 = model.encode(df_final.loc[i, "diagnostico_predicted"], convert_to_tensor=True)
@@ -442,10 +577,6 @@ async def asistente_seleccionador_cie10(df_final: pd.DataFrame, CIE10_full_list:
         else:
             resultados.append((i, df_final.loc[i, "CIE10_selected"], df_final.loc[i, "diagnostico_selected"], df_final.loc[i, "similarity_predicted_selected"]))
 
-    tareas = [retry_async(procesar_fila, i, find_CIE10_similars_level, retries=5) for i in range(len(df_final))]
-
-    for future in tqdm(asyncio.as_completed(tareas), total=len(tareas), desc=desc, unit="diagnostico"):
-        await future
 
     for i, cie10_sel, diag_sel, sim_val in resultados:
         df_final.loc[i, f"CIE10_selected{sufijo}"] = cie10_sel
@@ -459,7 +590,7 @@ async def asistente_seleccionador_cie10(df_final: pd.DataFrame, CIE10_full_list:
     return df_final
 
 
-async def asistente_juzgador_cie10(df_final: pd.DataFrame, prompt_CIE10_juzgador: str, llm, contexts: dict[str, str], docs_dir: Path, semaforo = asyncio.Semaphore, json_parse: bool = False, tratamiento_fallos: bool = False) -> pd.DataFrame:
+def asistente_juzgador_cie10(df_final: pd.DataFrame, prompt_CIE10_juzgador: str, llm, contexts: dict[str, str], docs_dir: Path, json_parse: bool = False, tratamiento_fallos: bool = False) -> pd.DataFrame:
     """
     Función que permite que el asistene juzgador lleve a cabo su tarea. Navega por todo el DataFrame añadiendo una nueva columna fina `tree_5`:
     
@@ -477,8 +608,6 @@ async def asistente_juzgador_cie10(df_final: pd.DataFrame, prompt_CIE10_juzgador
             - Objeto LLM mediante el cual poder hacer las llamadas
         `contexts`: dict[str, str]:
             - Diccionario de todos los documentos leidos anteriormente. Key es el nombre, value el contenido
-        `semaforo`: asyncio.Semaphore
-            - Semaforo para poder hacer toda la actividad de forma asincrona
         `json_parse`: bool
             - Booleano para saber si es necesario realizar un parse de los resultados de del LLM
             - Se realiza con LLMs que NO sean de OpenAI
@@ -503,38 +632,32 @@ async def asistente_juzgador_cie10(df_final: pd.DataFrame, prompt_CIE10_juzgador
     resultados = []
     failed = []
 
-    async def procesar_fila(idx: int, row: pd.Series):
+    for idx, row in tqdm(df_final.iterrows(), total=len(df_final), desc=desc, unit="diagnostico"):
         if (row["tree_4"] is True) or (tratamiento_fallos and row["tree_5"] is True):
             resultado = True
         else:
             max_retries = 5
-            async with semaforo:
-                for attempt in range(1, max_retries + 1):
-                    try:
-                        # raw_result = await juzgar_CIE10(row[f"CIE10_selected{sufijo}"], row[f"diagnostico_selected{sufijo}"], row["diagnostico_predicted"], contexts[row["nombre_archivo"]], prompt_CIE10_juzgador, llm, docs_dir, json_parse)
-                        raw_result = await juzgar_CIE10(row[f"CIE10_selected{sufijo}"], row[f"diagnostico_selected{sufijo}"], row["diagnostico_predicted"], prompt_CIE10_juzgador, docs_dir, json_parse)
-                        if not validate_json_created(raw_result, docs_dir / "esquema_juzgar.json"):
-                            raise Exception(f"El JSON creado del documento para la fila {idx} no sigue el esquema indicado")
-                        result = raw_result["resultado"]
-                        if isinstance(result, str):
-                            result = result.replace('"', '').strip()
-                            result = result.lower() == "true"
-                        resultado = result
-                        break
-                    except Exception as e:
-                        print(f"⚠️ Error al juzgar la fila {idx} : {e!r}")
-                        traceback.print_exc()
-                        if attempt < max_retries:
-                            print("↻ Reintentando...")
-                        else:
-                            failed.append(idx)
-                            print(f"❌ Falló definitivamente al juzgar la fila {idx}\n")
+            for attempt in range(1, max_retries + 1):
+                try:
+                    # raw_result = juzgar_CIE10(row[f"CIE10_selected{sufijo}"], row[f"diagnostico_selected{sufijo}"], row["diagnostico_predicted"], contexts[row["nombre_archivo"]], prompt_CIE10_juzgador, llm, docs_dir, json_parse)
+                    raw_result = juzgar_CIE10(row[f"CIE10_selected{sufijo}"], row[f"diagnostico_selected{sufijo}"], row["diagnostico_predicted"], prompt_CIE10_juzgador, docs_dir, json_parse)
+                    if not validate_json_created(raw_result, docs_dir / "esquema_juzgar.json"):
+                        raise Exception(f"El JSON creado del documento para la fila {idx} no sigue el esquema indicado")
+                    result = raw_result["resultado"]
+                    if isinstance(result, str):
+                        result = result.replace('"', '').strip()
+                        result = result.lower() == "true"
+                    resultado = result
+                    break
+                except Exception as e:
+                    print(f"⚠️ Error al juzgar la fila {idx} : {e!r}")
+                    traceback.print_exc()
+                    if attempt < max_retries:
+                        print("↻ Reintentando...")
+                    else:
+                        failed.append(idx)
+                        print(f"❌ Falló definitivamente al juzgar la fila {idx}\n")
         resultados.append((idx, resultado))
-
-    tareas = [procesar_fila(idx, row) for idx, row in df_final.iterrows()]
-
-    for future in tqdm(asyncio.as_completed(tareas), total=len(tareas), desc=desc, unit="diagnostico"):
-        await future
 
     for idx, resultado in resultados:
         df_final.loc[idx, f"tree_5{sufijo}"] = resultado
@@ -544,7 +667,7 @@ async def asistente_juzgador_cie10(df_final: pd.DataFrame, prompt_CIE10_juzgador
 
     return df_final
 
-async def asistente_seleccionador_tratamiento_falsos_cie10(df_final: pd.DataFrame, prompt_CIE10_seleccionador: str, llm, contexts: dict[str, str], docs_dir: Path, semaforo: asyncio.Semaphore, json_parse: bool = False) -> pd.DataFrame:
+def asistente_seleccionador_tratamiento_falsos_cie10(df_final: pd.DataFrame, prompt_CIE10_seleccionador: str, llm, contexts: dict[str, str], docs_dir: Path, json_parse: bool = False) -> pd.DataFrame:
     """
     Función que permite volver a realizar el proceso de selección de códigos CIE10 a aquellos diagnosticos que no han podido ser declarados como correctos en procesos anteriores
 
@@ -570,44 +693,39 @@ async def asistente_seleccionador_tratamiento_falsos_cie10(df_final: pd.DataFram
             - DataFrame final con la última columna completada
     """
     resultados = []
-
-    async def procesar_fila(idx: int, row: pd.Series):
+        
+    for idx, row in tqdm(df_final.iterrows(), total=len(df_final), desc="Completando el DF (reselección)", unit="diagnostico"):
         if row["tree_5"] is True:
             resultado = row["CIE10_selected"]
         else:
             max_retries = 5
-            async with semaforo:
-                for attempt in range(1, max_retries + 1):
-                    try:
-                        raw_result = await decidir_CIE10(row["diagnostico_predicted"], contexts[row["nombre_archivo"]], prompt_CIE10_seleccionador, llm, docs_dir, json_parse)
-                        if not validate_json_created(raw_result, docs_dir / "esquema_selected_and_decider.json"):
-                            raise Exception(f"El JSON creado del documento para la fila {idx} no sigue el esquema indicado")
-                        resultado = raw_result["CIE10"]
-                        break
-                    except Exception as e:
-                        print(f"⚠️ Error al reseleccionar la fila {idx}: {e!r}")
-                        traceback.print_exc()
-                        if attempt < max_retries:
-                            print("↻ Reintentando...")
-                        else:
-                            resultado = None
-                            print(f"❌ Falló definitivamente la fila {idx}\n")
+            for attempt in range(1, max_retries + 1):
+                try:
+                    raw_result = decidir_CIE10(row["diagnostico_predicted"], contexts[row["nombre_archivo"]], prompt_CIE10_seleccionador, llm, docs_dir, json_parse)
+                    if not validate_json_created(raw_result, docs_dir / "esquema_selected_and_decider.json"):
+                        raise Exception(f"El JSON creado del documento para la fila {idx} no sigue el esquema indicado")
+                    resultado = raw_result["CIE10"]
+                    break
+                except Exception as e:
+                    print(f"⚠️ Error al reseleccionar la fila {idx}: {e!r}")
+                    traceback.print_exc()
+                    if attempt < max_retries:
+                        print("↻ Reintentando...")
+                    else:
+                        resultado = None
+                        print(f"❌ Falló definitivamente la fila {idx}\n")
+            if resultado == None:
+                resultado = row["CIE10_selected"]
+            else:
+                resultado = clean_single_cie10_value(resultado)
                 if resultado == None:
                     resultado = row["CIE10_selected"]
-                else:
-                    resultado = clean_single_cie10_value(resultado)
-                    if resultado == None:
-                        resultado = row["CIE10_selected"]
         resultados.append((idx, resultado))
 
-    tareas = [procesar_fila(idx, row) for idx, row in df_final.iterrows()]
-
-    for future in tqdm(asyncio.as_completed(tareas), total=len(tareas), desc="Completando el DF (reselección)", unit="diagnostico"):
-        await future
 
     for idx, resultado in resultados:
         df_final.loc[idx, "CIE10_predicted_V2"] = resultado
 
     df_final = df_final.reset_index(drop=True)
-    
+
     return df_final
