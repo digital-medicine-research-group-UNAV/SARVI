@@ -21,6 +21,6 @@ __pycache__
 /notebooks/FT*
 /notebooks/Perceiver
 
-/src/MrDoc.egg-info
+/src/SARVI.egg-info
 
 /tmp/*
