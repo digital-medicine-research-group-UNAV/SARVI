@@ -1,4 +1,6 @@
-<h3 align="center">MrDoc</h3>
+<h1 align="center"><strong>SARVI</strong></h1>
+<h2 align="center">System for Automated Recognition and
+Validation of ICD-10 Diagnoses</h2>
 
 # Instalation
 
@@ -14,7 +16,7 @@ pip install -e .
         .\.venv\Scripts\Activate.ps1
         ```
 
-> The command `pip install -e .` allows to just do `import MrDoc` into any project
+> The command `pip install -e .` allows to just do `import SARVI` into any project
 
 - Rename the file `private/data.env.template` to `private/data.env` and add the corresponding values 
 
@@ -22,7 +24,7 @@ pip install -e .
 - **Package style** -> see `notebooks/package_functionality.ipynb`
 - **Command style** -> 
 ```bash
-python -m src.MrDoc.main --tarea docx_to_jsons --cie_10_version 2026 --modo sync --llm_service vllm --llm_model openai/gpt-oss-20b --folder_and_archive_name Full_CUN_V0.1
+python -m src.SARVI.main --tarea docx_to_jsons --cie_10_version 2026 --modo sync --llm_service vllm --llm_model openai/gpt-oss-20b --folder_and_archive_name Full_CUN_V0.1
 ```
 
 ## Minimum variables to stablish
