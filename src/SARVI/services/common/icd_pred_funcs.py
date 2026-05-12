@@ -57,7 +57,7 @@ def embed_texts(texts: list, batch_size: int = 64, max_length: int = 512, show_t
     with torch.no_grad():
         iterator = range(0, len(new_texts), batch_size)
         if show_tqdm:
-            iterator = tqdm(iterator)
+            iterator = tqdm(iterator, desc="Embedding texts", unit="text")
         for i in iterator:
             batch = new_texts[i:i+batch_size]
             
@@ -99,7 +99,7 @@ def create_all_labels_desc(ctx: PipelineContext, label2id: dict):
     df["target_id"] = df["Code Perceiver"].map(label2id)
 
     all_labels_desc_ORIGINAL = defaultdict(list)
-    for code in tqdm(df.groupby(["target_id"], group_keys=True)[["Description"]]):
+    for code in tqdm(df.groupby(["target_id"], group_keys=True)[["Description"]], desc="Gathering diags definitions: Original dictionary", unit="diag"):
         all_labels_desc_ORIGINAL[code[0][0]] = code[1]["Description"].to_list()
 
     ####################################
@@ -109,7 +109,7 @@ def create_all_labels_desc(ctx: PipelineContext, label2id: dict):
     df["target_id"] = df["All Code Perceiver"].apply(lambda x: [label2id[c] for c in x])
 
     all_labels_desc_CODIESP = defaultdict(list)
-    for _,row in tqdm(df.iterrows(), total=len(df)):
+    for _,row in tqdm(df.iterrows(), total=len(df), desc="Gathering diags definitions: CodiEsp", unit="diag"):
         for code,desc in zip(row["target_id"], row["All Description"]):
             all_labels_desc_CODIESP[code].append(desc)
 
@@ -120,7 +120,7 @@ def create_all_labels_desc(ctx: PipelineContext, label2id: dict):
     df["target_id"] = df["All Code Perceiver"].apply(lambda x: [label2id[c] for c in x])
 
     all_labels_desc_CARES = defaultdict(list)
-    for _,row in tqdm(df.iterrows(), total=len(df)):
+    for _,row in tqdm(df.iterrows(), total=len(df), desc="Gathering diags definitions: CARES", unit="diag"):
         for code,desc in zip(row["target_id"], row["All Description"]):
             all_labels_desc_CARES[code].append(desc)
 
@@ -130,7 +130,7 @@ def create_all_labels_desc(ctx: PipelineContext, label2id: dict):
     df = df[df["All Code Full"].str.len() > 0]
     df["target_id"] = df["All Code Perceiver"].apply(lambda x: [label2id[c] for c in x])
 
-    for _,row in tqdm(df.iterrows(), total=len(df)):
+    for _,row in tqdm(df.iterrows(), total=len(df), desc="Gathering diags definitions: CARES", unit="diag"):
         for code,desc in zip(row["target_id"], row["All Description"]):
             all_labels_desc_CARES[code].append(desc)
 
@@ -143,7 +143,7 @@ def create_all_labels_desc(ctx: PipelineContext, label2id: dict):
 
     all_labels_desc = {}
 
-    for code in tqdm(all_labels_desc_ORIGINAL.keys(), total=len(all_labels_desc_ORIGINAL)):
+    for code in tqdm(all_labels_desc_ORIGINAL.keys(), total=len(all_labels_desc_ORIGINAL), desc="Gathering diags definitions: Embedding definitions", unit="diag"):
         codes_desc_REAL = list(set(all_labels_desc_CODIESP[code] + all_labels_desc_CARES[code]))
         if codes_desc_REAL == []:
             codes_desc_REAL = list(set(all_labels_desc_REST[code]))
@@ -204,6 +204,13 @@ def extract_flattened_predictions(data: list, all_preds: list):
         warnings.warn(f"Número de series ({len(flattened_predictions)}) distinto de ({len(all_preds)}).")
 
     return flattened_predictions
+
+def result_item_to_diagnostico(item):
+    terminos, codigo_cie10, metadata = item
+
+    diagnostico_extraido = (" ".join(terminos) if isinstance(terminos, list) else str(terminos))
+
+    return {"diagnostico_extraido": diagnostico_extraido, "codigo_CIE10": codigo_cie10, "fecha_alta": "none", "fecha_baja": "none", "pertenencia": ""}
 
 def initialize_icd10_hs_head_model(ctx: PipelineContext, name: str, root: SoftmaxNode) -> ICD10Predictor_HS_Head:
     checkpoint = read_torch_checkpoint(ctx, name)

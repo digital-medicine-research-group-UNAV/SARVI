@@ -99,7 +99,7 @@ def run_icd10_hs_model(model: ICD10Predictor_HS_Head, predictor: ICD10Predictor_
 
     with torch.no_grad():
 
-        for inputs, queries, all_desc in tqdm(data_loader, total=len(data_loader)):
+        for inputs, queries, all_desc in tqdm(data_loader, total=len(data_loader), desc="(HS) ICD predictions...", unit="diag"):
 
             inputs = inputs.to(device, dtype=dtype, non_blocking=True)
             queries = queries.to(device, dtype=dtype, non_blocking=True)
@@ -146,7 +146,7 @@ def run_icd10_no_hs_model(model: ICD10Predictor_NO_HS, data_loader: DataLoader):
 
     with torch.no_grad():
 
-        for inputs, queries, all_desc in tqdm(data_loader, total=len(data_loader)):
+        for inputs, queries, all_desc in tqdm(data_loader, total=len(data_loader), desc="(NO HS) ICD predictions...", unit="diag"):
 
             inputs = inputs.to(device, dtype=dtype, non_blocking=True)
             queries = queries.to(device, dtype=dtype, non_blocking=True)

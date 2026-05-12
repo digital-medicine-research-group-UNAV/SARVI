@@ -62,7 +62,7 @@ def prepare_data(data: pd.DataFrame, padding: bool, tokenizer: Any, model: Any, 
     
     data_prepared = []
 
-    for i, info in tqdm(iterator, total=len(data)):
+    for i, info in tqdm(iterator, total=len(data), desc="Preparing data for NER prediction: Window slicing and overlapping tokens", unit="text"):
         windows = series_to_striding_ner_windows(info, tokenizer=tokenizer, window_tokens=window_tokens_no_special, stride=stride, padding=padding)
 
         last_hidden_state_list = []
@@ -109,7 +109,7 @@ def construct_dataset_ner(data: list, tokenizer: Any, skip_incomplete_spans: boo
     """
     rows = []
 
-    for instance in tqdm(data):
+    for instance in tqdm(data, desc="Constructing NER dataset: Creating correct spans", unit="text subsequence"):
 
         for i,subinstance in enumerate(instance):
 
@@ -200,7 +200,7 @@ def run_ner_model(model: SpanClassifier, data_loader: DataLoader, device: torch.
     all_value_preds = []
 
     with torch.no_grad():
-        for batch in tqdm(data_loader):
+        for batch in tqdm(data_loader, desc="NER predictions...", unit="span"):
             span_repr, cls_repr, span_widths = batch
 
             span_repr = span_repr.to(device)

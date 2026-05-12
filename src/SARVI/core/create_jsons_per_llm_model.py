@@ -1,7 +1,9 @@
-import tqdm
 import random
 import traceback
 import pandas as pd
+
+from pathlib import Path
+from tqdm.auto import tqdm
 from natsort import natsorted
 
 from ..models.schemas import (
@@ -37,16 +39,20 @@ from ..services.common.ner_funcs import(
     initialize_span_ner_model,
     id2label_ner,
     prepara_data_from_ner_pred_to_icd_pred,
-    corrected_entities_to_df,
+    corrected_entities_to_df
 )
 from ..services.common.icd_pred_funcs import(
     initialize_icd10_hs_head_model,
     initialize_icd10_hs_prediction_model,
     initialize_icd10_no_hs_head_model,
     extract_flattened_predictions,
+    result_item_to_diagnostico
 )
 from ..services.common.utils.icd_preds_utils import (
     remap_ids
+)
+from ..services.common.utils.json_utils import (
+    validate_json_created
 )
 
 from ..services.sync_funcs.llm_funcs import (
@@ -72,6 +78,7 @@ from ..services.async_funcs.llm_funcs import (
 )
 
 def initialize_variables(ctx: PipelineContext):
+    print("0. Initializing variables\n")
     create_intermediate_folder_name(ctx)
 
     #################################################################################################################
@@ -204,27 +211,39 @@ def run_docx_to_jsons_deterministic_sync(ctx: PipelineContext):
 
     # ------------------------------CIE10------------------------------
     print("2.1. Creating ICD10 prediction data")
-    data_loader = construct_loaders_icd10_SYNC(df_final_ner)
+    final_results = {}
 
-    print("2.2. Running ICD10 prediction data // YES HS")
-    all_pred_yes_hs, all_value_preds_yes_hs, all_desc_global_yes_hs = run_icd10_hs_model_SYNC(config.modelo_icd10_head[0], config.modelo_icd10_prediction[0], data_loader)
-    print("2.3. Running ICD10 prediction data // NO HS")
-    all_pred_no_hs, all_value_preds_no_hs, all_desc_global_no_hs = run_icd10_no_hs_model_SYNC(config.modelo_icd10_head[1], data_loader)
+    for i in tqdm(range(len(df_final_ner)), desc="Making ICD10 predictions", unit="text"):
+        df_final_ner_file = df_final_ner.iloc[[i]]
+        data_loader = construct_loaders_icd10_SYNC(df_final_ner_file)
 
-    all_pred_no_hs = [config.id_no_hs_to_id_hs[i] for i in all_pred_no_hs]
-    all_value_preds_no_hs = remap_ids(all_value_preds_no_hs, config.id_no_hs_to_id_hs)
-    assert all_desc_global_yes_hs == all_desc_global_no_hs, f"Descriptions arrays are different // Training has been done shuffled"
+        print(f"{i} // 2.2. Running ICD10 prediction data // YES HS")
+        all_pred_yes_hs, all_value_preds_yes_hs, all_desc_global_yes_hs = run_icd10_hs_model_SYNC(config.modelo_icd10_head[0], config.modelo_icd10_prediction[0], data_loader)
+        print(f"{i} // 2.3. Running ICD10 prediction data // NO HS")
+        all_pred_no_hs, all_value_preds_no_hs, all_desc_global_no_hs = run_icd10_no_hs_model_SYNC(config.modelo_icd10_head[1], data_loader)
 
-    print("2.4. Creating final predictions")
-    flattened_predictions_yes_hs = extract_flattened_predictions(all_value_preds_yes_hs, all_pred_yes_hs)
-    flattened_predictions_no_hs = extract_flattened_predictions(all_value_preds_no_hs, all_pred_no_hs)
+        all_pred_no_hs = [config.id_no_hs_to_id_hs[i] for i in all_pred_no_hs]
+        all_value_preds_no_hs = remap_ids(all_value_preds_no_hs, config.id_no_hs_to_id_hs)
+        assert all_desc_global_yes_hs == all_desc_global_no_hs, f"Descriptions arrays are different // Training has been done shuffled"
 
-    results_yes_hd = apply_thresholds_icd10_SYNC(flattened_predictions_yes_hs, config.icd10_thresholds["YES_HS"])
-    results_no_hd = apply_thresholds_icd10_SYNC(flattened_predictions_no_hs, config.icd10_thresholds["NO_HS"])
+        print(f"{i} // 2.4. Creating final predictions")
+        flattened_predictions_yes_hs = extract_flattened_predictions(all_value_preds_yes_hs, all_pred_yes_hs)
+        flattened_predictions_no_hs = extract_flattened_predictions(all_value_preds_no_hs, all_pred_no_hs)
 
-    final_results = [(all_desc_global_yes_hs[i], config.id2label_ICD10[0][all_pred_yes_hs[i]] if yes[0] else config.id2label_ICD10[0][all_pred_no_hs[i]] if no[0] else config.id2label_ICD10[0][all_pred_yes_hs[i]], yes if yes[0] else no if no[0] else yes) for i, (yes, no) in enumerate(zip(results_yes_hd, results_no_hd))]
+        results_yes_hd = apply_thresholds_icd10_SYNC(flattened_predictions_yes_hs, config.icd10_thresholds["YES_HS"])
+        results_no_hd = apply_thresholds_icd10_SYNC(flattened_predictions_no_hs, config.icd10_thresholds["NO_HS"])
 
-    return final_results
+        results = [(all_desc_global_yes_hs[i], config.id2label_ICD10[0][all_pred_yes_hs[i]] if yes[0] else config.id2label_ICD10[0][all_pred_no_hs[i]] if no[0] else config.id2label_ICD10[0][all_pred_yes_hs[i]], yes if yes[0] else no if no[0] else yes) for i, (yes, no) in enumerate(zip(results_yes_hd, results_no_hd))]
+
+        final_results[df_final_ner_file["Original File"][i]] = results
+
+    for filename, items in final_results.items():
+        respuesta_determinista = {"diagnosticos": [result_item_to_diagnostico(item) for item in items]}
+        if not validate_json_created(respuesta_determinista, ctx.paths.docs_dir / "esquema_diagnosticos.json"):
+            raise Exception(f"El JSON creado del documento {filename} no sigue el esquema indicado")
+        write_json(ctx, Path(filename), respuesta_determinista)
+    
+    # return df_final_ner, data_loader, flattened_predictions_yes_hs, flattened_predictions_no_hs, final_results
     # return (df_final_ner, df_final_ner_corrected), (df_data_full, df_data_diags, tmp), (entities_correction_decision), (final_results, results_yes_hd, results_no_hd, flattened_predictions_yes_hs, flattened_predictions_no_hs)
     
 

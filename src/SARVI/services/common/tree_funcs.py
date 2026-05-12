@@ -119,7 +119,7 @@ def load_tree_hierarchical_module(df_reference: pd.DataFrame):
     # CLEAN DATA
     # -------------------------
     rows = []
-    for _, row in tqdm(df_reference.iterrows(), total=len(df_reference)):
+    for _, row in tqdm(df_reference.iterrows(), total=len(df_reference), desc="Hierarchical tree construction: Cleaning data", unit="code"):
         code = str(row["Código"]).strip().upper()
 
         if "." in code:
