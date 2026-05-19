@@ -48,7 +48,7 @@ def prepare_data(data: pd.DataFrame, padding: bool, tokenizer: Any, model: Any, 
             - Número máximo de tokens por ventana sin contar tokens especiales. Por defecto es **510** *(512-2 tokens especiales)*.
 
         `stride`: int
-            - Número de tokens de solapamiento o desplazamiento entre ventanas consecutivas. Por defecto es **128*.
+            - Desplazamiento entre ventanas consecutivas, medido en tokens del texto completo. Por defecto es **128**.
 
         `strict`: bool
             - Si es `True`, aplica comprobaciones estrictas al fusionar los estados ocultos solapados. Por defecto es **False**.
@@ -113,7 +113,9 @@ def construct_dataset_ner(data: list, tokenizer: Any, skip_incomplete_spans: boo
 
         for i,subinstance in enumerate(instance):
 
-            token_span_sequences = generate_sequences(tokenizer, subinstance["input_ids"], max_len=15)
+            active_len = int(sum(subinstance.get("attention_mask", [1] * len(subinstance["input_ids"]))))
+            active_input_ids = subinstance["input_ids"][:active_len]
+            token_span_sequences = generate_sequences(tokenizer, active_input_ids, max_len=15)
 
             for token_span in token_span_sequences:
                 if skip_incomplete_spans and not is_valid_decoder(tokenizer.convert_ids_to_tokens(token_span[1]), tokenizer.convert_ids_to_tokens(token_span[2]), tokenizer):
@@ -131,7 +133,7 @@ def construct_dataset_ner(data: list, tokenizer: Any, skip_incomplete_spans: boo
                     subsequence = {"File": subinstance["file_name"], "Tokens": token_span[1], 
                                 "Decoded span": decoded_span,
                                 "CLS Embedding": subinstance["embedding"][0][0],  
-                                "Embeddings": subinstance["embedding"][0][token_span[0][0]:token_span[0][-1]],
+                                "Embeddings": subinstance["embedding"][0][token_span[0][0]:token_span[0][-1] + 1],
                                 "Token idx": token_span[0], "Text instance": i}
 
                 rows.append(subsequence)
