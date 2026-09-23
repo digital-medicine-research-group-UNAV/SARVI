@@ -1,47 +1,315 @@
 import torch
 import torch.nn as nn
+import pandas as pd
+
+from typing import Any
 from anytree import PostOrderIter
 
-class SpanClassifier(nn.Module):
-    def __init__(self, span_dim, cls_dim, num_classes, max_span_width, width_emb_dim=25, dropout=0.1):
+from .losses import (
+    CombinedMarginLoss
+)
+
+from ..services.common.utils.ner_utils import (
+    average_overlapping_hidden_states
+)
+from ..services.common.span_funcs import (
+    construct_span_data
+)
+
+class NERClassifier(nn.Module):
+    def __init__(self, encoder: nn.Module, freeze_encoder: bool = False):
         super().__init__()
 
-        # Width embeddings (TRAINABLE)
-        self.width_embeddings = nn.Embedding(max_span_width + 1, width_emb_dim)
-        nn.init.xavier_uniform_(self.width_embeddings.weight)
+        self.encoder = encoder
 
-        # Clasificador (TRAINABLE)
-        input_dim = span_dim + cls_dim + width_emb_dim
+        if freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+
+    def forward(self, batch: dict | None = None, input_ids: torch.Tensor | None = None, attention_mask: torch.Tensor | None = None, global_token_indices: torch.Tensor | None = None, **encoder_kwargs) -> dict:
+        if batch is not None:
+            input_ids = batch["input_ids"] if input_ids is None else input_ids
+            attention_mask = batch.get("attention_mask", attention_mask)
+            global_token_indices = batch["global_token_indices"] if global_token_indices is None else global_token_indices
+
+        if input_ids is None:
+            raise ValueError("input_ids is required")
+        if global_token_indices is None:
+            raise ValueError("global_token_indices is required")
+
+        if any(param.requires_grad for param in self.encoder.parameters()):
+            encoder_outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask, **encoder_kwargs)
+        else:
+            with torch.no_grad():
+                encoder_outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask, **encoder_kwargs)
+
+        last_hidden_state = encoder_outputs.last_hidden_state
+        merged_hidden_state = average_overlapping_hidden_states(last_hidden_state=last_hidden_state, global_token_indices=global_token_indices, attention_mask=attention_mask)
+
+        out = {"input_ids": input_ids, "attention_mask": attention_mask, "global_token_indices": global_token_indices, "last_hidden_state": merged_hidden_state, "encoder_outputs": encoder_outputs}
+
+        if batch is not None:
+            for key in ("window_to_text", "window_local_index", "text_indices", "file_names", "text_token_offsets", "text_token_lengths", "window_labels", "window_offset_mapping"):
+                if key in batch:
+                    out[key] = batch[key]
+
+        return out
+
+class Span_NERClassifier(NERClassifier):
+    def __init__(self, encoder: nn.Module, num_labels: int, id2label: dict, label2id: dict, dropout=0.1, tokenizer: Any|None = None, skip_incomplete_spans: bool = True, lexicon: pd.DataFrame|None = None, freeze_encoder: bool = False):
+        super().__init__(encoder=encoder, freeze_encoder=freeze_encoder)
+
+        self.id2label = id2label
+        self.label2id = label2id
+        self.skip_incomplete_spans = skip_incomplete_spans
+        self.tokenizer = tokenizer
+        self.lexicon = lexicon
+
+        input_dim = encoder.config.hidden_size
 
         self.classifier = nn.Sequential(
             nn.LayerNorm(input_dim),
             nn.Linear(input_dim, input_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(input_dim * 2, num_classes)
+            nn.Linear(input_dim * 2, num_labels)
         )
 
-    def forward(self, span_repr, cls_repr, span_width):
-        """
-        span_repr:  [N, span_dim]
-        cls_repr:   [N, cls_dim]
-        span_width: [N]
-        """
+    def forward(self, batch: dict) -> dict:
+        base_out = super().forward(batch=batch)
+        base_out = construct_span_data(base_out, id2label=self.id2label, label2id=self.label2id, tokenizer=self.tokenizer, skip_incomplete_spans=self.skip_incomplete_spans, lexicon=self.lexicon)
 
-        # To NOT train prior encoder data
-        span_repr = span_repr.detach()
-        cls_repr = cls_repr.detach()
+        hidden_states = base_out["last_hidden_state"]
+        logits = self.classifier(hidden_states)
+        out = {**base_out, "logits": logits}
 
-        width_emb = self.width_embeddings(span_width)  # [N, width_emb_dim]
+        return out
+    
+class BIO_NERClassifier(NERClassifier):
+    def __init__(self, encoder: nn.Module, num_labels: int, dropout=0.1):
+        super().__init__(encoder=encoder)
 
-        x = torch.cat([span_repr, cls_repr, width_emb], dim=-1)
-        logits = self.classifier(x)
+        input_dim = encoder.config.hidden_size
 
-        return logits
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, input_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(input_dim * 2, num_labels)
+        )
 
-class ICD10Predictor_HS_Head(nn.Module):
-    def __init__(self, root, decoder_query_dim=1024):
+    def forward(self, batch: dict) -> dict:
+        base_out = super().forward(batch=batch)
+
+        hidden_states = base_out["last_hidden_state"]
+        logits = self.classifier(hidden_states)
+        out = {**base_out, "logits": logits}
+
+        return out
+
+class REClassifier(nn.Module):
+    def __init__(self, encoder: nn.Module, num_labels: int, middle_token_count_bin_embeddings: int | None = None, dropout: float = 0.1, freeze_encoder: bool = False):
         super().__init__()
+
+        if middle_token_count_bin_embeddings is None or middle_token_count_bin_embeddings < 1:
+            raise ValueError("middle_token_count_bin_embeddings is required and must be >= 1")
+
+        self.encoder = encoder
+        self.num_labels = num_labels
+        self.middle_token_count_bin_embedding_count = int(middle_token_count_bin_embeddings)
+
+        if freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+
+        input_dim = encoder.config.hidden_size
+        classifier_input_dim = input_dim * 3
+        
+        self.middle_token_count_bin_embeddings = nn.Embedding(self.middle_token_count_bin_embedding_count, input_dim)
+        nn.init.xavier_uniform_(self.middle_token_count_bin_embeddings.weight)
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(start_dim=1),
+            nn.LayerNorm(classifier_input_dim),
+            nn.Linear(classifier_input_dim, classifier_input_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(classifier_input_dim * 2, num_labels)
+        )
+
+    def gather_token_embeddings(self, hidden_states: torch.Tensor, positions: torch.Tensor, name: str) -> torch.Tensor:
+        if positions.dim() != 1:
+            raise ValueError(f"{name} must have shape [batch_size], got {tuple(positions.shape)}")
+        if positions.numel() != hidden_states.size(0):
+            raise ValueError(f"{name} must have one position per example.")
+        if positions.lt(0).any():
+            raise ValueError(f"{name} contains missing positions: {positions.detach().cpu().tolist()}")
+        if positions.ge(hidden_states.size(1)).any():
+            raise ValueError(f"{name} contains positions outside sequence length {hidden_states.size(1)}")
+
+        batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
+        return hidden_states[batch_indices, positions]
+
+    def forward(self, batch: dict) -> dict:
+        input_ids = batch["input_ids"]
+        attention_mask = batch.get("attention_mask")
+        marker_position_ids = batch["marker_position_ids"].to(device=input_ids.device, dtype=torch.long)
+        sep_position_ids = batch["sep_position_ids"].to(device=input_ids.device, dtype=torch.long)
+        middle_token_count_bin = batch["middle_token_count_bin"].to(device=input_ids.device, dtype=torch.long)
+
+        if marker_position_ids.dim() != 2 or marker_position_ids.size(1) != 4:
+            raise ValueError(f"marker_position_ids must have shape [batch_size, 4], got {tuple(marker_position_ids.shape)}")
+
+        encoder_outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        hidden_states = encoder_outputs.last_hidden_state
+
+        subject_start = self.gather_token_embeddings(hidden_states, marker_position_ids[:, 0], "subject_start marker positions")
+        subject_end = self.gather_token_embeddings(hidden_states, marker_position_ids[:, 1], "subject_end marker positions")
+        object_start = self.gather_token_embeddings(hidden_states, marker_position_ids[:, 2], "object_start marker positions")
+        object_end = self.gather_token_embeddings(hidden_states, marker_position_ids[:, 3], "object_end marker positions")
+        sep_embedding = self.gather_token_embeddings(hidden_states, sep_position_ids, "sep positions")
+
+        middle_token_count_bin_for_embedding = middle_token_count_bin.clamp(min=0, max=self.middle_token_count_bin_embedding_count - 1)
+        middle_embedding = self.middle_token_count_bin_embeddings(middle_token_count_bin_for_embedding)
+
+        subject_embedding = torch.stack([subject_start, subject_end], dim=1).max(dim=1).values
+        object_embedding = torch.stack([object_start, object_end], dim=1).max(dim=1).values
+        relation_token_embeddings = torch.stack([subject_embedding, object_embedding, sep_embedding + middle_embedding,], dim=1)
+
+        logits = self.classifier(relation_token_embeddings)
+
+        return {"logits": logits}
+    
+class ATTClassifier(nn.Module):
+    def __init__(self, encoder: nn.Module, num_labels: int, dropout: float = 0.1, freeze_encoder: bool = False):
+        super().__init__()
+
+        self.encoder = encoder
+        self.num_labels = num_labels
+
+        if freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+
+        input_dim = encoder.config.hidden_size
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(start_dim=1),
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, input_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(input_dim * 2, num_labels)
+        )
+
+    def gather_token_embeddings(self, hidden_states: torch.Tensor, positions: torch.Tensor, name: str) -> torch.Tensor:
+        if positions.dim() != 1:
+            raise ValueError(f"{name} must have shape [batch_size], got {tuple(positions.shape)}")
+        if positions.numel() != hidden_states.size(0):
+            raise ValueError(f"{name} must have one position per example.")
+        if positions.lt(0).any():
+            raise ValueError(f"{name} contains missing positions: {positions.detach().cpu().tolist()}")
+        if positions.ge(hidden_states.size(1)).any():
+            raise ValueError(f"{name} contains positions outside sequence length {hidden_states.size(1)}")
+
+        batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
+        return hidden_states[batch_indices, positions]
+
+    def forward(self, batch: dict) -> dict:
+        input_ids = batch["input_ids"]
+        attention_mask = batch.get("attention_mask")
+        marker_position_ids = batch["marker_position_ids"].to(device=input_ids.device, dtype=torch.long)
+
+        if marker_position_ids.dim() != 2 or marker_position_ids.size(1) != 2:
+            raise ValueError(f"marker_position_ids must have shape [batch_size, 2], got {tuple(marker_position_ids.shape)}")
+
+        encoder_outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        hidden_states = encoder_outputs.last_hidden_state
+
+        subject_start = self.gather_token_embeddings(hidden_states, marker_position_ids[:, 0], "subject_start marker positions")
+        subject_end = self.gather_token_embeddings(hidden_states, marker_position_ids[:, 1], "subject_end marker positions")
+
+        subject_embedding = torch.stack([subject_start, subject_end], dim=1).max(dim=1).values
+
+        logits = self.classifier(subject_embedding)
+
+        return {"logits": logits}
+
+
+class ICD10Predictor(nn.Module):
+    def __init__(self, encoder, tokenizer, device, freeze_encoder: bool = False):
+        super().__init__()
+        
+        self.encoder = encoder
+        self.tokenizer = tokenizer if tokenizer is not None else getattr(encoder, "tokenizer", None)
+        self.device = device
+        self.freeze_encoder = freeze_encoder
+
+        if self.freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+
+    def forward(self, diagnoses):
+        if torch.is_tensor(diagnoses):
+            if diagnoses.dim() == 2:
+                diagnoses = diagnoses.unsqueeze(0)
+            return diagnoses
+
+        if self.encoder is None or self.tokenizer is None:
+            raise ValueError("encoder and tokenizer are required when ICD10Predictor receives raw diagnosis text")
+        
+        texts, batch_size, query_count = self.flatten_diagnosis_texts(diagnoses)
+        proj_dtype = next(self.proj.parameters()).dtype
+        cache = {}
+        new_texts = list(set(texts))
+
+        tokens = self.tokenizer(new_texts, padding=True, truncation=True, max_length=self.encoder.config.max_position_embeddings, return_tensors="pt", add_special_tokens=False)
+        tokens = {key: value.to(self.device) for key, value in tokens.items()}
+
+        encoder_is_trainable = torch.is_grad_enabled() and any(param.requires_grad for param in self.encoder.parameters())
+        context = torch.enable_grad() if encoder_is_trainable else torch.no_grad()
+        with context:
+            outputs = self.encoder(**tokens)
+
+        hidden = outputs.last_hidden_state
+        mask = tokens["attention_mask"].unsqueeze(-1).to(dtype=hidden.dtype)
+        pooled = (hidden * mask).sum(1) / mask.sum(1).clamp(min=1)
+
+        for text, emb in zip(new_texts, pooled):
+            cache[text] = emb
+
+        embeddings = torch.stack([cache[text] for text in texts])
+        return embeddings.to(dtype=proj_dtype).reshape(batch_size, query_count, -1)
+
+    def flatten_diagnosis_texts(self, diagnoses):
+        if isinstance(diagnoses, str):
+            return [diagnoses], 1, 1
+
+        if not isinstance(diagnoses, (list, tuple)):
+            raise TypeError(f"Unsupported diagnoses type: {type(diagnoses)}")
+
+        if len(diagnoses) == 0:
+            raise ValueError("diagnoses cannot be empty")
+
+        if all(isinstance(item, str) for item in diagnoses):
+            return list(diagnoses), 1, len(diagnoses)
+
+        if all(isinstance(item, (list, tuple)) for item in diagnoses):
+            query_counts = [len(item) for item in diagnoses]
+            if len(set(query_counts)) != 1:
+                raise ValueError("Raw ICD diagnosis batches must have the same number of diagnoses per item")
+            texts = [text for item in diagnoses for text in item]
+            if not all(isinstance(text, str) for text in texts):
+                raise TypeError("Raw ICD diagnoses must be strings")
+            return texts, len(diagnoses), query_counts[0]
+
+        raise TypeError("Raw ICD diagnoses must be a string, a list of strings, or a nested list of strings")
+
+
+class ICD10Predictor_HS_Head(ICD10Predictor):
+    def __init__(self, root, device, decoder_query_dim=1024, encoder=None, tokenizer=None, freeze_encoder: bool = False):
+        super().__init__(encoder=encoder, tokenizer=tokenizer, device=device, freeze_encoder=freeze_encoder)
 
         self.root = root
         # ---------------------------
@@ -67,18 +335,21 @@ class ICD10Predictor_HS_Head(nn.Module):
 
         nn.init.xavier_uniform_(self.proj[1].weight)
 
-    def forward(self, output_query):
+    def forward(self, diagnoses):
+        diagnoses = super().forward(diagnoses=diagnoses)
         # ---------------------------
         # Projection head
         # ---------------------------
-        x = self.proj(output_query)
+        x = self.proj(diagnoses)
         B, Q, D = x.shape
         x = x.reshape(B * Q, D)  # (N, D)
         return x
 
 class ICD10Predictor_HS_CrossEntropyLoss(nn.Module):
-    def __init__(self, root, all_labels_desc, internal_K=1):
+    def __init__(self, root, all_labels_desc, device, weight=None, reduction="mean", internal_K=1):
         super().__init__()
+        self.register_buffer("weight", weight)
+        self.reduction = reduction
         self.internal_K = int(internal_K)
 
         if self.internal_K < 1:
@@ -328,6 +599,40 @@ class ICD10Predictor_HS_CrossEntropyLoss(nn.Module):
                 "C": C,
             }
 
+        # -------------------------------------------------
+        # Target paths for ArcFace training
+        # -------------------------------------------------
+        max_depth = 0
+        for node in all_nodes:
+            max_depth = max(max_depth, len(node.path) - 1)
+
+        path_parents = torch.full((self.num_real_nodes, max_depth), self.root_dense_idx, dtype=torch.long)
+        path_children = torch.full((self.num_real_nodes, max_depth), -1, dtype=torch.long)
+        path_alphas = torch.zeros((self.num_real_nodes, max_depth), dtype=torch.float)
+        path_valid = torch.zeros((self.num_real_nodes, max_depth), dtype=torch.bool)
+
+        for node in all_nodes:
+            node_idx = self.node_to_dense_all[node]
+            correct_nodes = [self.node_to_dense_all[n] for n in node.path[1:]]
+
+            for step_idx, (correct_node_level, ancestor) in enumerate(zip(correct_nodes, node.ancestors)):
+                parent_idx = self.node_to_dense_all[ancestor]
+                alpha = float(self.dense_to_node_all[correct_node_level].alpha)
+
+                path_parents[node_idx, step_idx] = parent_idx
+                path_children[node_idx, step_idx] = correct_node_level
+                path_alphas[node_idx, step_idx] = alpha
+                path_valid[node_idx, step_idx] = True
+
+        self.register_buffer("path_parents", path_parents)
+        self.register_buffer("path_children", path_children)
+        self.register_buffer("path_alphas", path_alphas)
+        self.register_buffer("path_valid", path_valid)
+        self.max_depth = max_depth
+
+        # Official ArcFace settings in arcface_torch: m1=1.0, m2=0.5, m3=0.0  -> ArcFace branch
+        self.arcface = CombinedMarginLoss(s=64.0, m1=1.0, m2=0.5, m3=0.0, interclass_filtering_threshold=0.0).to(device)
+
     def _normalized_internal_prototypes(self, dtype=None):
         if self.num_internal == 0:
             return self.internal_prototypes
@@ -385,8 +690,92 @@ class ICD10Predictor_HS_CrossEntropyLoss(nn.Module):
     def _level_key(self, parent_idx):
         return f"neg{abs(int(parent_idx))}" if int(parent_idx) < 0 else str(int(parent_idx))
 
-    def forward(self):
-        pass
+    def forward(self, outputs, targets=None, inference=False):
+        if inference and targets is None:
+            return self.predict(outputs)
+
+        if targets is None:
+            raise ValueError("targets are required when inference=False")
+
+        if isinstance(outputs, (list, tuple)):
+            outputs = torch.stack(outputs, dim=0)
+        if isinstance(targets, (list, tuple)):
+            targets = torch.as_tensor(targets, device=outputs.device)
+
+        x = nn.functional.normalize(outputs, dim=-1)
+        targets = targets.to(device=outputs.device).view(-1).long()
+        B = x.size(0)
+
+        path_parents = self.path_parents[targets]
+        path_children = self.path_children[targets]
+        path_alphas = self.path_alphas[targets]
+        path_valid = self.path_valid[targets]
+
+        internal_proto_norm = self._normalized_internal_prototypes(dtype=x.dtype)
+
+        if inference:
+            num_steps_per_sample = path_valid.sum(dim=1).tolist()
+            result_total = [[None] * int(num_steps_per_sample[b]) for b in range(B)]
+
+            for step_idx in range(self.max_depth):
+                valid = path_valid[:, step_idx]
+                if not torch.any(valid):
+                    continue
+
+                batch_idx_all = torch.nonzero(valid, as_tuple=False).squeeze(1)
+                step_parents = path_parents[batch_idx_all, step_idx]
+
+                for parent_tensor in torch.unique(step_parents):
+                    parent_idx = int(parent_tensor.item())
+                    group_mask = (step_parents == parent_tensor)
+                    sample_idx = batch_idx_all[group_mask]
+
+                    logits_cos, child_global, _ = self._level_logits(parent_idx=parent_idx, x_sub=x[sample_idx], internal_proto_norm=internal_proto_norm, return_target_to_local=False)
+
+                    values, indices = torch.max(logits_cos, dim=1)
+                    pred_global = child_global[indices]
+
+                    for row, b in enumerate(sample_idx.detach().cpu().tolist()):
+                        result_total[b][step_idx] = (values[row:row + 1], [int(pred_global[row].detach().cpu().item())])
+
+            return result_total
+
+        per_sample_loss = torch.zeros(B, device=x.device, dtype=x.dtype)
+
+        for step_idx in range(self.max_depth):
+            valid = path_valid[:, step_idx]
+            if not torch.any(valid):
+                continue
+
+            batch_idx_all = torch.nonzero(valid, as_tuple=False).squeeze(1)
+            step_parents = path_parents[batch_idx_all, step_idx]
+            step_children = path_children[batch_idx_all, step_idx]
+            step_alpha = path_alphas[batch_idx_all, step_idx].to(dtype=x.dtype)
+
+            for parent_tensor in torch.unique(step_parents):
+                parent_idx = int(parent_tensor.item())
+                group_mask = (step_parents == parent_tensor)
+
+                sample_idx = batch_idx_all[group_mask]
+                correct_child_global = step_children[group_mask]
+                alpha = step_alpha[group_mask]
+
+                logits_cos, _, target_to_local = self._level_logits(parent_idx=parent_idx, x_sub=x[sample_idx], internal_proto_norm=internal_proto_norm, return_target_to_local=True)
+
+                target_local = target_to_local[correct_child_global]
+                logits_cos = logits_cos.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+                logits = self.arcface(logits_cos.clone(), target_local)
+
+                ce = nn.functional.cross_entropy(logits, target_local, weight=self.weight, reduction="none")
+                per_sample_loss.index_add_(0, sample_idx, alpha * ce)
+
+        if self.reduction == "none":
+            return per_sample_loss
+        if self.reduction == "sum":
+            return per_sample_loss.sum()
+        if self.reduction == "mean":
+            return per_sample_loss.mean()
+        raise ValueError(f"Unsupported reduction: {self.reduction}")
 
     def predict(self, outputs):
         if isinstance(outputs, (list, tuple)):
@@ -441,9 +830,9 @@ class ICD10Predictor_HS_CrossEntropyLoss(nn.Module):
 
         return node_idx_total.detach().cpu().tolist(), result_total
 
-class ICD10Predictor_NO_HS(nn.Module):
-    def __init__(self, root, all_labels_desc, decoder_query_dim=1024):
-        super().__init__()
+class ICD10Predictor_NO_HS(ICD10Predictor):
+    def __init__(self, root, device, all_labels_desc, decoder_query_dim=1024, encoder=None, tokenizer=None, freeze_encoder: bool = False):
+        super().__init__(encoder=encoder, tokenizer=tokenizer, device=device, freeze_encoder=freeze_encoder)
 
         self.root = root
         # ---------------------------
@@ -508,25 +897,32 @@ class ICD10Predictor_NO_HS(nn.Module):
         
         self.K_leaf = int(self.counts_leaf.max().item())
 
-    def forward(self, output_query):
+        # Official ArcFace settings in arcface_torch: m1=1.0, m2=0.5, m3=0.0  -> ArcFace branch
+        self.arcface = CombinedMarginLoss(s=64.0, m1=1.0, m2=0.5, m3=0.0, interclass_filtering_threshold=0.0).to(device)
+
+    def forward(self, diagnoses, inference, targets):
+        diagnoses = super().forward(diagnoses=diagnoses)
         # ---------------------------
         # Projection head
         # ---------------------------
-        x = self.proj(output_query)
+        x = self.proj(diagnoses)
         B, Q, D = x.shape
         x = x.reshape(B * Q, D)  # (N, D)
 
         # ---------------------------
         # SIM value -> Per class
         # ---------------------------
-        class_scores = self.predict(x, self.defs_norm_leaf, self.def_class_ids_leaf, self.subcenter_ids_leaf, self.num_classes_leaf, self.K_leaf)
+        class_scores = self.predict(x, self.defs_norm_leaf, self.def_class_ids_leaf, self.subcenter_ids_leaf, self.num_classes_leaf, self.K_leaf, inference, targets)
         return class_scores
     
-    def predict(self, input_data, defs_norm, def_class_ids, subcenter_ids, num_classes, K):
+    def predict(self, input_data, defs_norm, def_class_ids, subcenter_ids, num_classes, K, inference, targets):
         # ---------------------------
         # Cosine similarity
         # ---------------------------
         x_norm = nn.functional.normalize(input_data, dim=-1)
+        defs_norm = defs_norm.to(device=input_data.device, dtype=input_data.dtype)
+        def_class_ids = def_class_ids.to(device=input_data.device)
+        subcenter_ids = subcenter_ids.to(device=input_data.device)
         sim = x_norm @ defs_norm.T  # (N, N_defs)
 
         # ---------------------------
@@ -538,4 +934,9 @@ class ICD10Predictor_NO_HS(nn.Module):
         # place each definition score into its class/subcenter slot
         S[:, def_class_ids, subcenter_ids] = sim    # [B*Q, C, K]
         S_prime = S.max(dim=2).values               # [B*Q, C]
-        return S_prime
+        if inference:
+            return S_prime
+        
+        S_prime = S_prime.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+        logits = self.arcface(S_prime.clone(), targets)
+        return logits

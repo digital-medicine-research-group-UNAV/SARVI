@@ -6,6 +6,7 @@ __pycache__
 *.pt
 *.parquet
 *.venv*
+.*
 
 /data/input/*
 !/data/input/.gitkeep
@@ -17,10 +18,16 @@ __pycache__
 /logs/*
 !/logs/.gitkeep
 
-/notebooks/CodiEsp
-/notebooks/FT*
-/notebooks/Perceiver
+/notebooks/FT
+/notebooks/private
+/notebooks/ICDTraining/ICD_Analyze_Results.ipynb
+/notebooks/RETraining/Time_RE_Training_CT-EBM-SP_ONLY.ipynb
 
 /src/SARVI.egg-info
 
+/docs/CodiEsp
+/docs/MedLexSp_v2
+/docs/old
+
 /tmp/*
+/private/*

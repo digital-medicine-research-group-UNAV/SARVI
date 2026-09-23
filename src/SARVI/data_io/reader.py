@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import json
 import torch
+import pickle
 import textwrap
 import pandas as pd
 from pathlib import Path
@@ -7,83 +10,87 @@ from docx import Document
 from tqdm.auto import tqdm
 from collections import defaultdict
 
-from ..models.schemas import PipelineContext, Any
+from typing import Any, TYPE_CHECKING
 
-def read_parquet_file(ctx: PipelineContext, name: str) -> Any:
+if TYPE_CHECKING:
+    from ..models.schemas import PipelineContext
+
+def read_parquet_file(ctx: "PipelineContext", name: str) -> Any:
     return pd.read_parquet(ctx.paths.docs_dir / name)
 
-def read_torch_checkpoint(ctx: PipelineContext, name: str) -> Any:
-    return torch.load(ctx.paths.docs_dir / name)
+def read_torch_checkpoint(ctx: "PipelineContext", name: str) -> Any:
+    if (ctx.llm_config.device != "cpu"):
+        return torch.load(ctx.paths.docs_dir / name)
+    else:
+        return torch.load(ctx.paths.docs_dir / name, map_location=torch.device('cpu'))
 
-def cargar_docx_single(path: Path) -> str:
-    """
-    Load the `.docx` archive and transform it into a plain `str`
-
-    Parameters
-    ----------
-        `path`: Path
-            - Path of the single `.docx` archive
-
-    Returns
-    -------
-        `texto`: str
-            - Plain text of the original doc
-    """
+def read_docx_single(path: Path) -> str:
     doc = Document(path)
-    texto = "\n".join([p.text for p in doc.paragraphs if p.text.strip() != ""])
-    texto = textwrap.dedent(texto)
-    return texto
+    text = "\n".join([p.text for p in doc.paragraphs if p.text.strip() != ""])
+    text = textwrap.dedent(text)
+    return text
 
 
-def cargar_docx_lista(folder_path: Path) -> dict[str, str]:
-    """
-    Load all the the `.docx` archives inside a directory and creates a dict with all the transformed `.docx` into plain `str`
-
-    Parameters
-    ----------
-        `folder_path`: Path
-            - Path of all the `.docx` archives
-
-    Returns
-    -------
-        `total`: dict[str, str]
-            - Dict where the key is the file name and the value is the plain text
-    """
+def read_docx_list(folder_path: Path) -> dict[str, str]:
     total = defaultdict(str)
     docx_list = [f for f in folder_path.glob("*.docx") if f.is_file()]
 
     for report in docx_list:
-        informe_texto = cargar_docx_single(report)
+        text = read_docx_single(report)
+        total[report.stem] = text
+
+    return total
+
+def read_txt_single(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    text = textwrap.dedent(text)
+    return text
+
+
+def read_txt_list(folder_path: Path) -> dict[str, str]:
+    total = defaultdict(str)
+    txt_list = [f for f in folder_path.glob("*.txt") if f.is_file()]
+
+    for report in txt_list:
+        informe_texto = read_txt_single(report)
         total[report.stem] = informe_texto
 
     return total
 
+def read_ann_single(path: Path) -> dict[str, list[str]]:
+    annotations = defaultdict(list)
 
-def read_embeddings_pre_created(ctx: PipelineContext, pt_name: str):
-    if (ctx.llm_config.device != "cpu"):
-        return torch.load(ctx.paths.docs_dir / pt_name)
-    else:
-        return torch.load(ctx.paths.docs_dir / pt_name, map_location=torch.device('cpu'))
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+
+            if not line.strip():
+                continue
+
+            annotation_id = line.split("\t", 1)[0]
+            annotation_type = annotation_id[0]
+
+            annotations[annotation_type].append(line)
+
+    return dict(annotations)
 
 
-def read_excel(ctx: PipelineContext, xlsx_name: str, **kwargs: object):
+def read_ann_list(folder_path: Path) -> dict[str, dict[str, list[str]]]:
+    total = defaultdict(dict)
+    ann_list = [f for f in folder_path.glob("*.ann") if f.is_file()]
+
+    for report in ann_list:
+        ann_data = read_ann_single(report)
+        total[report.stem] = ann_data
+
+    return dict(total)
+
+
+def read_excel_single(ctx: "PipelineContext", xlsx_name: str, **kwargs: object) -> Any:
     return pd.read_excel(ctx.paths.docs_dir / xlsx_name, **kwargs)
 
 
 def read_json_single(path: Path) -> dict:
-    """
-    Read the a single `.json` and returns a dict with that data
-
-    Parameters
-    ----------
-        `path`: Path
-            - JSON path
-
-    Returns
-    -------
-        `data`: dict
-            - The `.json` data
-    """
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -97,21 +104,6 @@ def read_jsonl_single(path: Path) -> list:
     return data
 
 def read_json_diagnosticos(folders: list[Path]) -> dict[str, dict]:
-    """
-    Read the data from the multiple `.json` and returns a flatten list with all of them
-
-    Allows using multiple directories with multiple `.json` inside them
-
-    Parameters
-    ----------
-        `folders`: list[Path]
-            - List of all the directories to investigate
-
-    Returns
-    -------
-        `data`: list[dict]
-            - List with all the `.json` read
-    """
     data = defaultdict(dict)
 
     for folder in folders:
@@ -122,38 +114,18 @@ def read_json_diagnosticos(folders: list[Path]) -> dict[str, dict]:
     return data
 
 
-def load_schema_info(schema_path: Path) -> tuple:
-    """
-    Load valid and required keys from a JSON schema file.
-    Automatically targets the inner item schema if the root defines an array of objects,
-    otherwise targets the root object properties.
-
-    Parameters
-    ----------
-        `schema_path`: Path
-            - Path to the JSON schema file (e.g., 'esquema.json').
-
-    Returns
-    -------
-        `tuple`: (valid_keys, required, allow_extra)
-            - `valid_keys`: set with the allowed property names (from `items.properties` if a collection exists, otherwise from root `properties`).
-            - `required`: set with the required property names for that level.
-            - `allow_extra`: bool indicating if additional properties are allowed at that same level.
-    """
+def read_schema_info_single(schema_path: Path) -> tuple:
     with open(schema_path, "r", encoding="utf-8") as f:
-        esquema = json.load(f)
+        schema = json.load(f)
 
-    # Por defecto: usar propiedades de raíz
-    root_props = esquema.get("properties", {}) or {}
+    root_props = schema.get("properties", {}) or {}
     valid_keys = set(root_props.keys())
-    required = set(esquema.get("required", []) or [])
-    allow_extra = esquema.get("additionalProperties", True)
+    required = set(schema.get("required", []) or [])
+    allow_extra = schema.get("additionalProperties", True)
 
-    # Si existe alguna colección (array) con items tipo "object", usamos ese nivel (caso diagnosticos)
-    # Ejemplo: esquema_diagnosticos.json → usar items.required/props (los dicts internos). :contentReference[oaicite:2]{index=2}
-    for k, v in root_props.items():
-        if isinstance(v, dict) and v.get("type") == "array" and "items" in v:
-            items = v["items"]
+    for key, value in root_props.items():
+        if isinstance(value, dict) and value.get("type") == "array" and "items" in value:
+            items = value["items"]
             if isinstance(items, dict) and items.get("type") == "object":
                 item_props = items.get("properties", {}) or {}
                 valid_keys = set(item_props.keys())
@@ -162,3 +134,23 @@ def load_schema_info(schema_path: Path) -> tuple:
                 break
 
     return valid_keys, required, allow_extra
+
+def read_pickle_single(path: Path) -> Any:
+    with path.open("rb") as f:
+        data = pickle.load(f)
+
+    return data
+
+
+def read_pickle_list(folder_path: Path) -> dict[str, Any]:
+    total = defaultdict(object)
+
+    pickle_list = [f for f in folder_path.glob("*") if f.is_file() and f.suffix.lower() in {".pickle", ".pkl"}]
+
+    for pickle_file in pickle_list:
+        total[pickle_file.stem] = read_pickle_single(pickle_file)
+
+    return dict(total)
+
+def read_dsv_single(path: Path, sep: str = "|", **kwargs: object) -> pd.DataFrame:
+    return pd.read_csv(path, sep=sep, **kwargs)

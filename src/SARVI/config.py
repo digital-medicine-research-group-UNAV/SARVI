@@ -14,6 +14,7 @@ class AppPaths(BaseModel):
 
     @classmethod
     def from_settings(cls) -> "AppPaths":
+        """Create application paths from the project settings."""
         return cls(
             base_dir=BASE_DIR,
             data_input=BASE_DIR / "data" / "input",
