@@ -1,0 +1,13 @@
+{
+    "0": "B-DISO",
+    "1": "B-Date",
+    "2": "B-LIVB",
+    "3": "B-Neg_cue",
+    "4": "B-Spec_cue",
+    "5": "I-DISO",
+    "6": "I-Date",
+    "7": "I-LIVB",
+    "8": "I-Neg_cue",
+    "9": "I-Spec_cue",
+    "10": "O"
+}

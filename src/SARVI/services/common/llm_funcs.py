@@ -18,17 +18,17 @@ PARTIAL_RE = re.compile(r"[A-Z][A-Za-z0-9]{1,2}(?:\.[A-Za-z0-9]{1,})?", re.I)
 
 def procesar_json_diagnosticos(data: dict[str, dict]) -> pd.DataFrame:
     """
-    Extract the data from the multiple `dict` and creates a DataFrame with them
+    Converts the JSON diagnosis response into a tabular representation.
 
     Parameters
     ----------
         `data`: dict[str, dict]
-            - Dict with all the data to tabulate. Keys are document name and value is the content in dict format
+            - Input dataframe containing the records to process.
 
     Returns
     -------
-        `df`: pd.DataFrame
-            - DataFrame constructed with all the data
+        `pd.DataFrame`
+            - Dataframe containing the transformed records.
     """
     diagnosticos_consolidado = []
 
@@ -49,17 +49,17 @@ def procesar_json_diagnosticos(data: dict[str, dict]) -> pd.DataFrame:
 
 def clean_single_cie10_value(value: str) -> str | None:
     """
-    Clean or validate a single CIE10 code string.
+    Normalizes one ICD-10 value and rejects empty or invalid values.
 
     Parameters
     ----------
-        value : str
-            - Raw value (possibly messy) representing a CIE10 code.
+        `value`: str
+            - Value to validate or normalize.
 
     Returns
     -------
-        str | None
-            - Cleaned CIE10 code string if valid, otherwise None.
+        `str | None`
+            - Normalized or parsed representation of the input.
     """
     if pd.isna(value):
         return None
@@ -75,20 +75,19 @@ def clean_single_cie10_value(value: str) -> str | None:
 
 def clean_df_obtained_with_llm(df: pd.DataFrame, col_name: str) -> pd.DataFrame:
     """
-    Clean the DataFrame previously constructed by an LLM.
-    Keeps only rows with valid and clean CIE10 codes.
+    Removes invalid ICD-10 predictions from a dataframe returned by the language model.
 
     Parameters
     ----------
-        df : pd.DataFrame
-            - DataFrame to clean
-        col_name : str
-            - Column name where the CIE10 codes are located
+        `df`: pd.DataFrame
+            - Input dataframe containing the records to process.
+        `col_name`: str
+            - Argument controlling col name.
 
     Returns
     -------
-        pd.DataFrame
-            - Cleaned DataFrame
+        `pd.DataFrame`
+            - Dataframe containing the transformed records.
     """
     keep_idx = []
 
@@ -102,74 +101,23 @@ def clean_df_obtained_with_llm(df: pd.DataFrame, col_name: str) -> pd.DataFrame:
 
 def find_CIE10_similars(CIE10: str, CIE10_full_list: list, level: int = 0) -> list:
     """
-    Giving a CIE10 code, this functions returns all the similar codes by the level wanted
+    Finds ICD-10 codes related to a code at the requested hierarchy level.
 
-    The value given to the variable `level` indicates where to cut the fixed values. Level *0* means to start after the *dot*.
-
-    **Example**: 
-        `CIE10` = K75.23
-        `level` = 0
-    **CIE10 FIXED**
-        K75.xx
-
-    ---
-
-    **Example**: 
-        `CIE10` = K75.23
-        `level` = -2
-    **CIE10 FIXED**
-        Kxx.xx
-
-    ---
-
-    Some examples are the following
-
-    ---
-
-    **Example**: 
-        `CIE10` = K75.23
-        `level` = 1
-    **Return**:
-        `CIE10_rest` = [K75.20, K75.21, ...]
-
-    ---
-
-    **Example**: 
-        `CIE10` = K75.23
-        `level` = -1
-    **Return**:
-        `CIE10_rest` = [K70.00, K70.01, ...]
-
-    ---
-        
     Parameters
     ----------
         `CIE10`: str
-            - CIE10 code to start the search
+            - ICD-10 code used as the similarity reference.
         `CIE10_full_list`: list
-            - Full list of CIE10 codes
-        `level`: int = 0
-            - Level indicating the fixed values
+            - Reference list of valid ICD-10 codes.
+        `level`: int
+            - Hierarchy level used to compare codes.
 
     Returns
     -------
-        `CIE10_rest`: list
-            - List with all the CIE10 codes founded
+        `list`
+            - List of parsed, filtered, or generated values.
     """
     def _parse(CIE10: str) -> tuple:
-        """
-        Given a CIE10 code, it parses and returns into three different pieces **left value**, **right value** and if it **has a dot** (which separates the values)
-
-        Parameters
-        ----------
-            `CIE10`: str
-                - CIE10 code to parse
-
-        Returns
-        -------
-            ``: tuple
-                - Tuple of **left value**, **right value** and if it **has a dot** values
-        """
         c = CIE10.strip().upper()
         if not CODE_RE.match(c):
             raise ValueError(f"Invalid CIE-10 code: {CIE10!r}")
@@ -177,7 +125,7 @@ def find_CIE10_similars(CIE10: str, CIE10_full_list: list, level: int = 0) -> li
             left, post = c.split(".", 1)
             return left, post, True
         return c, "", False
-    
+
     # Parse CIE10 code
     left, post, has_dot = _parse(CIE10)
 
@@ -238,33 +186,21 @@ def find_CIE10_similars(CIE10: str, CIE10_full_list: list, level: int = 0) -> li
 
 def completar_df_extra_data_for_analysis(df: pd.DataFrame, sim_threshold: float = 0.6, tratamiento_fallos: bool = False) -> pd.DataFrame:
     """
-    Función que se encarga de añadir nuevas columnas para completar la información que se puede averiguar de lo obtenido anteriormente y dictar que valores son correctos e incorrectos
-
-    No realiza ninguna busqueda nueva ni elimina contenido anterior. Solamente expande añadiendo nuevas métricas. En este caso son las siguientes:
-
-        1) CIE10 (True si lo anterior al punto coincide)
-            1.1) Predicted w/ Nearest
-            1.2) Predicted w/ Selected
-            1.3) Nearest w/ Selected
-            1.4) Predicted w/ Selected wnot/ Nearest
-            1.5) Nearest w/ Selected wnot/ Predicted
-            1.6) Predicted w/ Nearest w/ Selected
-
-        2) Columnas `tree_x` -> Utilizadas para decidir si un valor es correcto o incorrecto
+    Adds similarity and analysis fields derived from the selected ICD-10 predictions.
 
     Parameters
     ----------
         `df`: pd.DataFrame
-            - DataFrame con los datos obtenidos previamente
-        `sim_threshold` : float
-            - Umbral para similarity_predicted_nearest y similarity_predicted_selected
+            - Input dataframe containing the records to process.
+        `sim_threshold`: float
+            - Minimum similarity required to accept a match.
         `tratamiento_fallos`: bool
-            - Booleano para saber si realizar el analisis con los que no se han llegado a decidir como correcto anteriormente
+            - Whether fallback treatment logic is enabled.
 
     Returns
     -------
-        `df`: pd.DataFrame
-            - DataFrame con las nuevas columnas añadidas correctamente
+        `pd.DataFrame`
+            - Dataframe containing the transformed records.
     """
     if(tratamiento_fallos):
         sufijo = "_V2"
@@ -279,7 +215,7 @@ def completar_df_extra_data_for_analysis(df: pd.DataFrame, sim_threshold: float 
             ==
             df[f"CIE10_{comp[1]}"].astype("string").str.strip().str.upper().str.split(".", n=1).str[0]
         )
-    
+
     cie10_sim_ternary = [("predicted", "selected", "nearest"), ("nearest", "selected", "predicted"), ("predicted", "nearest", "selected")]
 
     for i, comp in enumerate(cie10_sim_ternary):
@@ -287,7 +223,7 @@ def completar_df_extra_data_for_analysis(df: pd.DataFrame, sim_threshold: float 
             df[f"similarity_{comp[0]}_and_{comp[1]}_not_{comp[2]}_CIE10{sufijo}"] = (
                 (
                     df[f"CIE10_{comp[0]}"].astype("string").str.strip().str.upper().str.split(".", n=1).str[0]
-                    == 
+                    ==
                     df[f"CIE10_{comp[1]}"].astype("string").str.strip().str.upper().str.split(".", n=1).str[0]
                 )
                 &
@@ -301,7 +237,7 @@ def completar_df_extra_data_for_analysis(df: pd.DataFrame, sim_threshold: float 
             df[f"similarity_{comp[0]}_and_{comp[1]}_and_{comp[2]}_CIE10{sufijo}"] = (
                 (
                     df[f"CIE10_{comp[0]}"].astype("string").str.strip().str.upper().str.split(".", n=1).str[0]
-                    == 
+                    ==
                     df[f"CIE10_{comp[1]}"].astype("string").str.strip().str.upper().str.split(".", n=1).str[0]
                 )
                 &

@@ -7,7 +7,7 @@ from sentence_transformers.util import cos_sim
 from sentence_transformers import SentenceTransformer
 
 from ....data_io.reader import (
-    load_schema_info
+    read_schema_info_single
 )
 
 ###
@@ -131,7 +131,7 @@ def clean_objects_with_schema(objetos: list[dict], schema_path: Path) -> list[di
                 * Has similar/translated keys renamed to the correct schema names.
                 * Is kept only if all required fields are present.
     """
-    valid_keys, required, allow_extra = load_schema_info(schema_path)
+    valid_keys, required, allow_extra = read_schema_info_single(schema_path)
 
     resultado = []
     for obj in objetos:

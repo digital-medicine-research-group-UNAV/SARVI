@@ -3,13 +3,11 @@ import tqdm
 import torch
 import ollama
 import asyncio
+from pathlib import Path
 
 from peft import PeftModel
 from langchain_openai import ChatOpenAI
 from transformers import AutoTokenizer, AutoModelForCausalLM, Mxfp4Config
-from vllm import LLM, SamplingParams
-from vllm.sampling_params import StructuredOutputsParams
-from vllm.lora.request import LoRARequest
 
 from ...models.schemas import (
     LLMConfig
@@ -17,6 +15,37 @@ from ...models.schemas import (
 from ...data_io.reader import (
     read_json_single
 )
+
+def configure_vllm_environment():
+    torch.use_deterministic_algorithms(False)
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
+    os.environ["VLLM_LOGGING_LEVEL"] = "ERROR"
+    os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "1"
+    # torch is built against CUDA 13.0, while the packaged CUDA compiler is
+    # 13.3. FlashInfer's bundled CCCL rejects that minor-version mismatch
+    # unless this compatibility check is disabled.
+    os.environ["CCCL_DISABLE_CTK_COMPATIBILITY_CHECK"] = "1"
+
+    nvcc = list(Path(os.environ["VIRTUAL_ENV"]).rglob("nvcc"))[0]
+
+    os.environ["FLASHINFER_NVCC"] = str(nvcc)
+    os.environ["CUDA_HOME"] = str(nvcc.parent.parent)
+    os.environ["FLASHINFER_EXTRA_CUDAFLAGS"] = "-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK"
+    os.environ["PATH"] = f"{nvcc.parent}:{os.environ['PATH']}"
+
+    import shutil
+
+    print("nvcc :", shutil.which("nvcc"))
+    print("ptxas:", shutil.which("ptxas"))
+
+    global LLM, SamplingParams, StructuredOutputsParams, LoRARequest
+    
+    from vllm import LLM, SamplingParams
+    from vllm.sampling_params import StructuredOutputsParams
+    from vllm.lora.request import LoRARequest
 
 #################################################################################################################
 class LLMTransformersWrapper:
@@ -30,7 +59,7 @@ class LLMTransformersWrapper:
             {"role": "assistant", "content": messages[0]},
             {"role": "user",   "content": messages[1]},
         ]
-        
+
         prompt_text = self.tok.apply_chat_template(
             messages_dict,
             tokenize=False,
@@ -55,7 +84,7 @@ class LLMTransformersWrapper:
             outputs = self.model.generate(**inputs, **gen_kwargs)
 
         return self.tok.decode(outputs[0], skip_special_tokens=True)
-    
+
 
     async def ainvoke(self, messages, max_new_tokens=8192, do_sample=False, temperature=0.0, **kwargs):
         return await asyncio.to_thread(self.invoke, messages, max_new_tokens, do_sample, temperature)
@@ -79,10 +108,10 @@ class LLMOllamaWrapper:
             stream=stream
         )
         return response["response"]
-    
+
     async def ainvoke(self, messages: list, stream: bool = False, **kwargs):
         return await asyncio.to_thread(self.invoke, messages, stream)
-    
+
 
 class LLMvLLMWrapper:
     def __init__(self, llm, lora_model, model_name):
@@ -103,7 +132,7 @@ class LLMvLLMWrapper:
 
         json_schema_llm_response = read_json_single(kwargs.get("json_schema"))
         sampling_params = SamplingParams(temperature=0, max_tokens=16384, structured_outputs=StructuredOutputsParams(json=json_schema_llm_response))
-        
+
         if self.lora_model is not None:
             if "BIO_QA_ITTF" in self.lora_model:
                 # base_model = AutoModelForCausalLM.from_pretrained(self.model_name)
@@ -124,20 +153,33 @@ class LLMvLLMWrapper:
             tqdm.tqdm = self._silent_tqdm
             outputs  = self.llm.chat(prompt, sampling_params, use_tqdm=False, lora_request=lora_req)
             tqdm.tqdm = self._original_tqdm
-        
+
         else:
             tqdm.tqdm = self._silent_tqdm
             outputs  = self.llm.chat(prompt, sampling_params, use_tqdm=False)
             tqdm.tqdm = self._original_tqdm
 
         return outputs[0].outputs[0].text
-    
+
     async def ainvoke(self, messages: list, stream: bool = False, **kwargs):
         return await asyncio.to_thread(self.invoke, messages, stream)
 
 #################################################################################################################
 
 def load_llm(cfg: LLMConfig) -> ChatOpenAI | LLMTransformersWrapper | LLMOllamaWrapper | LLMvLLMWrapper:
+    """
+    Loads and configures the language model used by the pipeline.
+
+    Parameters
+    ----------
+        `cfg`: LLMConfig
+            - Configuration for loading the language model.
+
+    Returns
+    -------
+        `ChatOpenAI | LLMTransformersWrapper | LLMOllamaWrapper | LLMvLLMWrapper`
+            - Initialized model or processing component.
+    """
     if (cfg.service == "openai"):
         return load_llm_openai_langchain_framework(cfg)
     elif (cfg.service == "ollama"):
@@ -169,14 +211,14 @@ def load_llm_openai_langchain_framework(cfg: LLMConfig) -> ChatOpenAI:
         `llm`: ChatOpenAI
             - Object from Langchain that is used as a llm
     """
-    if "4o" in cfg.model: 
+    if "4o" in cfg.model:
         llm = ChatOpenAI(
             model=cfg.model,
             reasoning={"effort": "low"},
             temperature=0,
             max_tokens=16384
         )
-    elif "o3" in cfg.model: 
+    elif "o3" in cfg.model:
         llm = ChatOpenAI(
             model=cfg.model,
             temperature=0,
@@ -204,14 +246,14 @@ def load_llm_transformers_local_framework(cfg: LLMConfig):
     Returns
     -------
         `llm`: LLMTransformersWrapper
-            - Wrapper que permite ejecutar inferencias directamente con llm.invoke()
+            - Wrapper that allows to execute inferences directly with llm.invoke()
     """
     torch.set_num_threads(cfg.num_threads)
     torch.set_num_interop_threads(cfg.num_interop_threads)
 
     tok = AutoTokenizer.from_pretrained(cfg.model)
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model, 
+        cfg.model,
         device_map="auto",
         quantization_config=Mxfp4Config(dequantize=True) if "gpt-oss" in cfg.model else None
     )
@@ -225,7 +267,7 @@ def load_llm_transformers_local_framework(cfg: LLMConfig):
                 device_map="auto",
             )
             model = model.merge_and_unload()
-        
+
         model = PeftModel.from_pretrained(
             model,
             cfg.lora_model,
@@ -236,8 +278,8 @@ def load_llm_transformers_local_framework(cfg: LLMConfig):
 
 def load_llm_ollama_local_framework(cfg):
     """
-    Inicializa un modelo Ollama local y devuelve un objeto con .invoke()
-    que permite generar texto como un LLM normal.
+    Initializes a local Ollama model and returns an object with .invoke()
+    for generating text like a standard LLM.
 
     Parameters
     ----------
@@ -247,7 +289,7 @@ def load_llm_ollama_local_framework(cfg):
     Returns
     -------
         `llm`: LLMOllamaWrapper
-            - Wrapper que permite ejecutar inferencias directamente con llm.invoke()
+            - Wrapper that allows to execute inferences directly with llm.invoke()
     """
 
     try:
@@ -259,8 +301,8 @@ def load_llm_ollama_local_framework(cfg):
 
 def load_llm_vllm_local_framework(cfg):
     """
-    Inicializa un modelo vLLM local y devuelve un objeto con .invoke()
-    que permite generar texto como un LLM normal.
+    Initializes a local vLLM model and returns an object with .invoke()
+    for generating text like a standard LLM.
 
     Parameters
     ----------
@@ -270,20 +312,19 @@ def load_llm_vllm_local_framework(cfg):
     Returns
     -------
         `llm`: LLMvLLMWrapper
-            - Wrapper que permite ejecutar inferencias directamente con llm.invoke()
+            - Wrapper that allows to execute inferences directly with llm.invoke()
     """
-    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-    os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
-    os.environ["VLLM_LOGGING_LEVEL"] = "ERROR"
+    configure_vllm_environment()
 
-    llm = LLM(model=cfg.model, gpu_memory_utilization=0.6,
+    llm = LLM(model=cfg.model, 
+        gpu_memory_utilization=cfg.gpu_memory_utilization,
+        max_num_seqs=cfg.max_num_seqs,
         enable_prefix_caching=True,
         limit_mm_per_prompt={
             "image": {"count": 0}, 
             "video": {"count": 0}
             },
-        enable_sleep_mode=True,
-        enable_lora=True if cfg.lora_model is not None else False
-        ) 
+        enable_lora=True if cfg.lora_model is not None else False,
+    ) 
 
     return LLMvLLMWrapper(llm, cfg.lora_model, cfg.model)

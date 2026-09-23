@@ -1,85 +1,29 @@
+from __future__ import annotations
+
 import torch
 import numpy as np
+import pandas as pd
+from typing import Any
 
-from ....models.schemas import (
-    Any
+from .ann_utils import (
+    normalize_ann_lines
 )
-
-def tensor_to_item(x: Any):
-    """
-    Convierte tensores de PyTorch en valores escalares, manteniendo la estructura original de listas, tuplas y diccionarios.
-
-    Parameters
-    ----------
-        `x`: Any
-            - Objeto que se quiere convertir. Puede ser un tensor, una lista, una tupla, un diccionario u otro tipo de dato
-
-    Returns
-    -------
-        ``: Any
-            - Objeto convertido. Si es un tensor, devuelve su valor mediante **item()**. Si es una estructura anidada, convierte recursivamente sus elementos.
-    """
-    if isinstance(x, torch.Tensor):
-        return x.item()
-
-    elif isinstance(x, list):
-        return [tensor_to_item(item) for item in x]
-
-    elif isinstance(x, tuple):
-        return tuple(tensor_to_item(item) for item in x)
-
-    elif isinstance(x, dict):
-        return {k: tensor_to_item(v) for k, v in x.items()}
-
-    else:
-        return x
-
-def tensor_items_same_structure(obj: Any):
-    """
-    Convierte tensores de PyTorch a valores nativos de Python o listas, conservando la misma estructura del objeto original.
-
-    Parameters
-    ----------
-        `obj`: Any
-            - Objeto que se quiere convertir. Puede ser un tensor, una lista, una tupla, un diccionario u otro tipo de dato
-
-    Returns
-    -------
-        ``: Any
-            - Objeto con la misma estructura que la entrada. Los tensores escalares se convierten con **item()** y los tensores no escalares se convierten a listas usando **detach().cpu().tolist()**
-    """
-    if isinstance(obj, torch.Tensor):
-        if obj.dim() == 0:
-            return obj.item()
-        return obj.detach().cpu().tolist()
-
-    elif isinstance(obj, tuple):
-        return tuple(tensor_items_same_structure(x) for x in obj)
-
-    elif isinstance(obj, list):
-        return [tensor_items_same_structure(x) for x in obj]
-
-    elif isinstance(obj, dict):
-        return {k: tensor_items_same_structure(v) for k, v in obj.items()}
-
-    return obj
 
 def remap_ids(x: Any, id_no_hs_to_id_hs: dict):
     """
-    Remapea IDs de forma recursiva usando un diccionario de correspondencias.
+    Remaps prediction IDs using the supplied ID mapping.
 
     Parameters
     ----------
         `x`: Any
-            - Objeto que contiene los IDs que se quieren remapear. Puede ser un entero, una lista, una tupla, un diccionario u otro tipo de dato
-
+            - Prediction value or collection to remap.
         `id_no_hs_to_id_hs`: dict
-            - Diccionario que mapea IDs originales a nuevos IDs
+            - Mapping from non-hierarchical IDs to hierarchical IDs.
 
     Returns
     -------
-        ``: Any
-            - Objeto con la misma estructura que la entrada, pero con los IDs enteros sustituidos por sus valores correspondientes en `id_no_hs_to_id_hs`. Los tipos no contemplados se devuelven sin modificar
+        `Any`
+            - Normalized or parsed representation of the input.
     """
     if isinstance(x, int):
         return id_no_hs_to_id_hs[x]
@@ -91,65 +35,221 @@ def remap_ids(x: Any, id_no_hs_to_id_hs: dict):
         return {k: remap_ids(v, id_no_hs_to_id_hs) for k, v in x.items()}
     else:
         return x
-    
-def tensor_a_float(x: Any):
+
+def find_file_column(df: pd.DataFrame) -> str | None:
     """
-    Convierte un valor a **float**, contemplando tensores, listas y escalares.
+    Finds the dataframe column containing source filenames.
 
     Parameters
     ----------
-        `x`: Any
-            - Valor que se quiere convertir. Puede ser un tensor de PyTorch, una lista o un valor escalar convertible a **float**
+        `df`: pd.DataFrame
+            - Input dataframe containing the records to process.
 
     Returns
     -------
-        ``: float
-            - Valor convertido a ``float``. Si es un tensor, se toma el primer elemento tras moverlo a CPU. Si es una lista, se convierte su primer elemento
+        `str | None`
+            - Matching value or collection, when available.
     """
-    if isinstance(x, torch.Tensor):
-        return float(x.detach().cpu().reshape(-1)[0].item())
-    if isinstance(x, list):
-        return float(x[0])
-    return float(x)
+    for column in ("archivo_origen", "Original File", "file_name", "File"):
+        if column in df.columns:
+            return column
+    return None
 
-def valor_normal(x: Any):
+def annotation_row_for_data_row(data_row: pd.Series, data_ann: pd.DataFrame, row_pos: int):
     """
-    Normaliza valores para facilitar comparaciones entre tensores, arrays, listas, tuplas y escalares
+    Finds the annotation row corresponding to one data row.
 
     Parameters
     ----------
-        `x`: Any
-            - Valor que se quiere normalizar. Puede ser un tensor de PyTorch, un array de NumPy, una lista, una tupla, un escalar de NumPy o un escalar normal
+        `data_row`: pd.Series
+            - Argument controlling data row.
+        `data_ann`: pd.DataFrame
+            - Annotation data used to align entities, attributes, or relations.
+        `row_pos`: int
+            - Position of the data row in the annotation table.
 
     Returns
     -------
-        ``: Any
-            - Valor normalizado. Si contiene un único elemento, devuelve el escalar correspondiente. Si contiene varios elementos, devuelve una lista con los valores normalizados
+        `Any`
+            - Derived value produced by the operation.
     """
-    # Tensor de torch
-    if isinstance(x, torch.Tensor):
-        x = x.detach().cpu()
-        if x.numel() == 1:
-            return x.reshape(-1)[0].item()
-        return x.tolist()
+    file_col = find_file_column(data_ann)
+    data_file_col = find_file_column(pd.DataFrame([data_row]))
 
-    # Array de numpy
-    if isinstance(x, np.ndarray):
-        if x.size == 1:
-            return x.reshape(-1)[0].item()
-        return x.tolist()
+    if file_col is not None and data_file_col is not None:
+        matches = data_ann[data_ann[file_col] == data_row[data_file_col]]
+        if len(matches) > 0:
+            return matches.iloc[0]
 
-    # Lista o tupla de un elemento
-    if isinstance(x, (list, tuple)):
-        if len(x) == 1:
-            return valor_normal(x[0])
-        return [valor_normal(v) for v in x]
+    return data_ann.iloc[row_pos]
 
-    # Escalares numpy
-    if hasattr(x, "item") and callable(x.item):
-        try:
-            return x.item()
-        except:
-            pass
+def has_value(value) -> bool:
+    """
+    Processes has value for use by the pipeline.
 
-    return x
+    Parameters
+    ----------
+        `value`: Any
+            - Value to validate or normalize.
+
+    Returns
+    -------
+        `bool`
+            - Boolean indicating whether the condition is satisfied.
+    """
+    if isinstance(value, (list, tuple)):
+        return True
+    return not pd.isna(value)
+
+def extract_brat_note_codes(value) -> dict[str, str]:
+    """
+    Extracts ICD codes from BRAT note annotations.
+
+    Parameters
+    ----------
+        `value`: Any
+            - Value to validate or normalize.
+
+    Returns
+    -------
+        `dict[str, str]`
+            - Mapping containing the processed values.
+    """
+    note_codes = {}
+
+    for line in normalize_ann_lines(value):
+        parts = str(line).split("\t")
+        if len(parts) < 3:
+            continue
+
+        note_info = parts[1].split()
+        if len(note_info) < 2 or note_info[0] != "AnnotatorNotes":
+            continue
+
+        target_id = note_info[1]
+        code = parts[2].strip().upper()
+        confidence = ""
+        judger = ""
+        if len(parts) >= 6:
+            confidence = parts[3].strip().upper()
+            judger = parts[5].strip().split(" ")[-1]
+        elif len(parts) >= 4:
+            confidence = parts[3].strip().upper()
+        if code:
+            note_codes[target_id] = (code, confidence, judger)
+
+    return note_codes
+
+def value_to_int(value):
+    """
+    Processes value to int for use by the pipeline.
+
+    Parameters
+    ----------
+        `value`: Any
+            - Value to validate or normalize.
+
+    Returns
+    -------
+        `Any`
+            - Derived value produced by the operation.
+    """
+    if hasattr(value, "item") and callable(value.item):
+        return int(value.item())
+    return int(value)
+
+def normalize_icd_code_label(label):
+    """
+    Normalizes the representation of an ICD code label.
+
+    Parameters
+    ----------
+        `label`: Any
+            - Entity or relation label.
+
+    Returns
+    -------
+        `Any`
+            - Normalized or parsed representation of the input.
+    """
+    if isinstance(label, str):
+        return label.upper()
+    return label
+
+def flatten_optional_nested(values):
+    """
+    Flattens an optional one-level nested collection.
+
+    Parameters
+    ----------
+        `values`: Any
+            - Values to flatten or normalize.
+
+    Returns
+    -------
+        `Any`
+            - Derived value produced by the operation.
+    """
+    if values is None:
+        return None
+    if len(values) == 0:
+        return []
+    if all(isinstance(item, (list, tuple)) for item in values):
+        return [value for item in values for value in item]
+    return list(values)
+
+def as_prediction_id_list(predictions):
+    """
+    Converts prediction output into a list of integer IDs.
+
+    Parameters
+    ----------
+        `predictions`: Any
+            - Prediction IDs or model outputs.
+
+    Returns
+    -------
+        `Any`
+            - Derived value produced by the operation.
+    """
+    if predictions is None:
+        return []
+    if torch.is_tensor(predictions):
+        return [int(value) for value in predictions.detach().cpu().reshape(-1).tolist()]
+    if isinstance(predictions, np.ndarray):
+        return [int(value) for value in predictions.reshape(-1).tolist()]
+    return [int(value.item() if hasattr(value, "item") else value) for value in predictions]
+
+def remap_icd_prediction_ids(value, id_map: dict):
+    """
+    Remaps ICD prediction IDs in tensors or nested collections.
+
+    Parameters
+    ----------
+        `value`: Any
+            - Value to validate or normalize.
+        `id_map`: dict
+            - Mapping from old prediction IDs to new IDs.
+
+    Returns
+    -------
+        `Any`
+            - Normalized or parsed representation of the input.
+    """
+    if torch.is_tensor(value):
+        if value.numel() == 1:
+            scalar = value.detach().cpu().item()
+            if isinstance(scalar, (int, np.integer)):
+                return id_map.get(int(scalar), int(scalar))
+        return value
+    if isinstance(value, np.ndarray):
+        return [remap_icd_prediction_ids(item, id_map) for item in value.tolist()]
+    if isinstance(value, (int, np.integer)):
+        return id_map.get(int(value), int(value))
+    if isinstance(value, list):
+        return [remap_icd_prediction_ids(item, id_map) for item in value]
+    if isinstance(value, tuple):
+        return tuple(remap_icd_prediction_ids(item, id_map) for item in value)
+    if isinstance(value, dict):
+        return {key: remap_icd_prediction_ids(item, id_map) for key, item in value.items()}
+    return value

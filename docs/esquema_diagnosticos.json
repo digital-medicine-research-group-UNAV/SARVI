@@ -12,7 +12,8 @@
           "codigo_CIE10":        { "type": "string" },
           "fecha_alta":          { "type": ["string", "null"] },
           "fecha_baja":          { "type": ["string", "null"] },
-          "pertenencia":         { "type": "string" }
+          "pertenencia":         { "type": "string" },
+          "ann_ent_id":          { "type": ["string", "null"]}
         },
         "required": [
           "diagnostico_extraido",

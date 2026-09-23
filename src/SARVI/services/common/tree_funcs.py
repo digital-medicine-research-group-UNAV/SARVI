@@ -9,17 +9,17 @@ from .utils.tree_utils import (
 
 def add_min_consecutive_subgroups(node_dict: dict):
     """
-    Refina un árbol jerárquico creando subgrupos mínimos de códigos consecutivos.
+    Adds synthetic subgroups for consecutive codes missing from the hierarchy.
 
     Parameters
     ----------
         `node_dict`: dict
-            - Diccionario con todos los nodos del árbol. Debe contener la clave **root**
+            - Hierarchy mapping to update.
 
     Returns
     -------
-        ``: None
-            - Modifica directamente los hijos de los nodos dentro de `node_dict`
+        `Any`
+            - Processed output for downstream pipeline steps.
     """
     root = node_dict["root"]
 
@@ -98,17 +98,17 @@ def add_min_consecutive_subgroups(node_dict: dict):
 
 def load_tree_hierarchical_module(df_reference: pd.DataFrame):
     """
-    Construye un árbol jerárquico de códigos a partir de un DataFrame de referencia.
+    Loads the ICD hierarchy and builds its hierarchical-softmax module.
 
     Parameters
     ----------
         `df_reference`: pd.DataFrame
-            - DataFrame con los códigos y descripciones de referencia. Debe contener las columnas **Código** y **Descripción**
+            - Reference dataframe used for comparison.
 
     Returns
     -------
-        `node_dict`: dict
-            - Diccionario con todos los nodos del árbol jerárquico. Incluye el nodo raíz, los nodos por letra, los rangos, las hojas y los nodos sintéticos creados para subgrupos consecutivos
+        `Any`
+            - Derived value produced by the operation.
     """
     node_dict = {}
 

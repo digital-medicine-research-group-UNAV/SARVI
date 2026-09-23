@@ -3,10 +3,6 @@ import sys
 from pathlib import Path
 
 class LoggerTee:
-    """
-    Duplica la salida (stdout/stderr) hacia consola y archivo,
-    añadiendo marca temporal a cada línea.
-    """
     def __init__(self, log_path, stream):
         self.terminal = stream
         self.log = open(log_path, "a", encoding="utf-8")

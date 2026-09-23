@@ -1,31 +1,70 @@
 import os
-# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 
 import gc
-import time
 import signal
 import torch
 import asyncio
 import argparse
 import contextlib
+import logging
+from transformers.utils import logging as hf_logging
+
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
+hf_logging.set_verbosity_error()
+hf_logging.disable_default_handler()
+hf_logging.disable_propagation()
+
 from .models.schemas import LLMConfig, PipelineContext, DisabledOptionError
 from .config import paths
 from .logging_redirect import enable_stdout_logging
-from .core.create_jsons_per_llm_model import run_docx_to_jsons_deterministic_sync, run_docx_to_jsons_genrative_sync, run_docx_to_jsons_deterministic_async, run_docx_to_jsons_genrative_async
-from .core.complete_excel_per_llm_model import run_jsons_to_xlsx_sync, run_jsons_to_xlsx_async
+from .core.s1 import (
+    run_s1_deterministic_sync, run_s1_genrative_sync, 
+    run_s1_deterministic_async, run_s1_genrative_async
+)
+from .core.s2 import (
+    run_s2_sync,
+    run_s2_async
+)
 
+def running_in_notebook() -> bool:
+    try:
+        from IPython import get_ipython
+        shell = get_ipython()
+        if shell is None:
+            return False
+        shell_name = shell.__class__.__name__
+        return shell_name in {"ZMQInteractiveShell", "Shell"}
+    except Exception:
+        return False
 
-def terminate_process(**kwargs) -> None:
+def terminate_process(signum=None, frame=None, exit_code: int = 0, **kwargs) -> None:
     with contextlib.suppress(Exception):
-        torch.distributed.destroy_process_group()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.ipc_collect()
-    time.sleep(2)
-    os.kill(os.getpid(), signal.SIGTERM)
+    if torch.cuda.is_available():
+        with contextlib.suppress(Exception):
+            torch.cuda.empty_cache()
+
+        with contextlib.suppress(Exception):
+            torch.cuda.ipc_collect()
+            
+    if running_in_notebook():
+        return
+    if signum is not None:
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    else:
+        raise SystemExit(exit_code)
 
 
 def run(ctx: PipelineContext, tarea: str, ussage: str, modo: str, folder_and_archive_name: str) -> None:
+
     ############################################
     if ctx.llm_config.lora_model != None:
         raise DisabledOptionError("Actually disabled, please do not select any LoRA model")
@@ -33,44 +72,46 @@ def run(ctx: PipelineContext, tarea: str, ussage: str, modo: str, folder_and_arc
         raise DisabledOptionError("Actually disabled, please do not run in async mode")
     ############################################
 
+    signal.signal(signal.SIGTERM, terminate_process)
     signal.signal(signal.SIGINT, terminate_process)
 
-    log_file = ctx.paths.logs_dir / f"{tarea}_{modo.upper()}_{folder_and_archive_name}.log"
+    log_file = ctx.paths.logs_dir / folder_and_archive_name / f"{tarea}_{modo.upper()}.log"
     enable_stdout_logging(log_file)
 
-    print(f"Ejecutando {tarea} // modo {modo} // ussage {ussage}...")
+    print(f"\033[1mEjecutando {tarea} // modo {modo} // ussage {ussage}...\033[0m")
 
-    if tarea == "docx_to_jsons":
+    if tarea == "s1":
         if modo == "sync":
             if ussage == "deterministic":
-                return run_docx_to_jsons_deterministic_sync(ctx)
+                run_s1_deterministic_sync(ctx)
             else:
-                run_docx_to_jsons_genrative_sync(ctx)
+                run_s1_genrative_sync(ctx)
         else:
             if ussage == "deterministic":
-                asyncio.run(run_docx_to_jsons_deterministic_async(ctx))
+                asyncio.run(run_s1_deterministic_async(ctx))
             else:
-                asyncio.run(run_docx_to_jsons_genrative_async(ctx))
+                asyncio.run(run_s1_genrative_async(ctx))
 
-    elif tarea == "jsons_to_xlsx":
+    elif tarea == "s2":
         if modo == "sync":
-            run_jsons_to_xlsx_sync(ctx)
+            run_s2_sync(ctx)
         else:
-            asyncio.run(run_jsons_to_xlsx_async(ctx))
+            asyncio.run(run_s2_async(ctx))
 
-    print("Ejecución finalizada.")
-    # terminate_process()    
+    print("\n\033[1mEjecución finalizada\033[0m")
+    terminate_process()    
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ejecuta una de los dos posibles opciones: DOCX -> JSONs // JSONs -> XLSX. Además de decidir si se quiere en modo sync // async"
+        description="Ejecuta una de los dos posibles opciones: S1 (DOCX/TXT -> JSONs) // S2 (JSONs -> XLSX). Además de decidir si se quiere en modo sync // async"
     )
+
     parser.add_argument(
         "--tarea",
         type=str,
         required=True,
-        choices=["docx_to_jsons", "jsons_to_xlsx"],
+        choices=["s1", "s2"],
         help="Tarea a ejecutar",
     )
 
@@ -87,16 +128,7 @@ def main() -> None:
         type=str,
         required=True,
         choices=["deterministic", "generative"],
-        help="Selecciona que tipo de modo quieres usar para ejecutar la tarea. SOLAMENTE TENDRÁ USO EN LA TAREA `docx_to_jsons`"
-    )
-
-    parser.add_argument(
-        "--deterministic_use_llm_for_corrections",
-        type=bool,
-        required=False,
-        choices=[True, False],
-        default=False,
-        help="Si se usa el modo determinista, declarar si se quiere utilizar un LLM para posibles correcciones"
+        help="Selecciona que tipo de modo quieres usar para ejecutar la tarea. SOLAMENTE TENDRÁ USO EN LA TAREA `s1`"
     )
 
     parser.add_argument(
@@ -138,6 +170,14 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--base_encoder_name",
+        type=str,
+        required=False,
+        default="IIC/RigoBERTa-Clinical",
+        help="Modelo de encoder a utilizar en los modelos.\n\n\t\tAUNQUE NODIFICABLE, UNICAMENTE FUNCIONA SI SE DEJA COMO VALOR PREDETERMINADO YA QUE LOS MODELOS ESTÁN ENTRENADOS BAJO ESE MODELO"
+    )
+
+    parser.add_argument(
         "--json_parse",
         type=bool,
         required=False,
@@ -169,6 +209,22 @@ def main() -> None:
         help="Numero de hilos interoperables a ejecutar. Default es 2"
     )
 
+    parser.add_argument(
+        "--gpu_memory_utilization",
+        type=float,
+        required=False,
+        default=0.88,
+        help="Fracción de memoria GPU que vLLM puede reservar. Default es 0.88"
+    )
+
+    parser.add_argument(
+        "--max_num_seqs",
+        type=int,
+        required=False,
+        default=32,
+        help="Número máximo de secuencias concurrentes para vLLM. Default es 32"
+    )
+
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -178,14 +234,16 @@ def main() -> None:
         lora_model=args.lora_model,
         device=device,
         num_threads=args.num_threads,
-        num_interop_threads=args.num_interop_threads
+        num_interop_threads=args.num_interop_threads,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_num_seqs=args.max_num_seqs
     )
     ctx = PipelineContext(
         ussage=args.ussage,
-        deterministic_use_llm_for_corrections=args.deterministic_use_llm_for_corrections,
         folder_and_archive_name=args.folder_and_archive_name,
         json_parse=args.json_parse,
         llm_config=cfg_llm,
+        base_encoder_name=args.base_encoder_name,
         MAX_CONCURRENCY=args.max_concurrency,
         paths=paths,
         cie_10_version=args.cie_10_version,

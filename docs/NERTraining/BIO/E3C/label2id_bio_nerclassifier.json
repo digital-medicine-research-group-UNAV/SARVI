@@ -1,0 +1,9 @@
+{
+    "B-DISO": 0,
+    "B-Date": 1,
+    "B-LIVB": 2,
+    "I-DISO": 3,
+    "I-Date": 4,
+    "I-LIVB": 5,
+    "O": 6
+}

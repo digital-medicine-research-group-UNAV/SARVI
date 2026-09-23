@@ -28,6 +28,23 @@ cie10_judger_tokenizer = AutoTokenizer.from_pretrained("JulenRM/RigoBERTa-Clinic
 cie10_judger_model = AutoModelForSequenceClassification.from_pretrained("JulenRM/RigoBERTa-Clinical_CIE10Judger").to(device)
 
 async def retry_async(fn, *args, retries=3, delay=1, **kwargs):
+    """
+    Retries an asynchronous operation after transient failures.
+
+    Parameters
+    ----------
+        `fn`: Any
+            - Callable to retry.
+        `retries`: Any
+            - Maximum number of retry attempts.
+        `delay`: Any
+            - Delay between retry attempts.
+
+    Returns
+    -------
+        `Any`
+            - Derived value produced by the operation.
+    """
     for attempt in range(retries):
         try:
             return await fn(*args, **kwargs)
@@ -38,42 +55,63 @@ async def retry_async(fn, *args, retries=3, delay=1, **kwargs):
             await asyncio.sleep(delay)
 #################################################################################################################
 
-async def procesar_docx(informe_texto: str, report: Path, prompt: str, llm, json_parse: bool, docs_dir: Path, semaforo: asyncio.Semaphore):
+async def process_docx(informe_texto: str, report: Path, prompt: str, llm, json_parse: bool, docs_dir: Path, semaforo: asyncio.Semaphore):
     """
-    Procesa un informe DOCX y guarda el resultado en un JSON.
-    Versión sincrónica.
+    Processes a DOCX report and returns its structured diagnosis output.
+
+    Parameters
+    ----------
+        `informe_texto`: str
+            - Text extracted from the report.
+        `report`: Path
+            - Source report path.
+        `prompt`: str
+            - Prompt supplied to the language model.
+        `llm`: Any
+            - Language model used for the operation.
+        `json_parse`: bool
+            - Whether the model response should be parsed as JSON.
+        `docs_dir`: Path
+            - Directory containing schemas or supporting documents.
+        `semaforo`: asyncio.Semaphore
+            - Semaphore controlling concurrent work.
+
+    Returns
+    -------
+        `Any`
+            - Processed output for downstream pipeline steps.
     """
     async with semaforo:
         respuesta_llm = await procesar_informe(informe_texto, prompt, llm, docs_dir, json_parse)
 
         if not validate_json_created(respuesta_llm, docs_dir / "esquema_diagnosticos.json"):
             raise Exception(f"El JSON creado del documento {report.stem} no sigue el esquema indicado")
-        
+
         return respuesta_llm
 
 async def procesar_informe(informe_raw: str, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
     """
     💸💸💸
 
-    Procesa el informe médico contenido en `informe_raw` utilizando un modelo OpenAI para extraer información
-    estructurada y guardarla en un archivo JSON.
+    Processes the medical report in `informe_raw` with an OpenAI model, extracts structured information,
+    and saves it to a JSON file.
 
     Parameters
     ----------
         `informe_raw`: str
-            - El informe en texto plano
+            - Report in plain text.
         `prompt`: str
-            - Prompt de instrucciones usado por el LLM para saber como dirigir su tarea
+            - Instruction prompt guiding the LLM task.
         `llm`
-            - Objeto LLM mediante el cual poder hacer las llamadas
+            - LLM object used to make the calls.
         `json_parse`: bool
-            - Booleano para saber si es necesario realizar un parse de los resultados de del LLM
-            - Se realiza con LLMs que NO sean de OpenAI
+            - Whether the LLM results need to be parsed.
+            - Used with LLMs that are not from OpenAI.
 
     Returns
     -------
         `respuesta_llm`: dict
-            - Respuesta del LLM directamente en formato dict/json
+            - Mapping containing the processed values.
     """
     messages = [SystemMessage(content=prompt),
                 HumanMessage(content=informe_raw)]
@@ -95,32 +133,32 @@ async def procesar_informe(informe_raw: str, prompt: str, llm, docs_dir: Path, j
         answer = json.loads(answer)
 
     return answer
-    
+
 
 async def seleccionar_CIE10_lista(enfermedad: str, CIE10_dict: dict, prompt: str, llm, docs_dir: Path, json_parse: bool = False) -> dict:
     """
     💸💸💸
 
-    Selecciona el código CIE10 correspondiente a la enfermedad dada como parámetro de entrada mediante una lista de códigos CIE10 también introducida como parámetro
+    Selects the CIE10 code corresponding to the supplied disease from a provided list of CIE10 codes.
 
     Parameters
     ----------
         `enfermedad`: str
-            - Enfermed de la cual se quiere obtener el código CIE10
+            - Disease for which the CIE10 code is requested.
         `CIE10_dict`: dict
-            - Diccionario de los posibles códigos CIE10 y su descripción sobre el cual la enfermedad puede basarse
+            - Dictionary of possible CIE10 codes and descriptions used as references for the disease.
         `prompt`: str
-            - Prompt de instrucciones usado por el LLM para saber como dirigir su tarea
+            - Instruction prompt guiding the LLM task.
         `llm`
-            - Objeto LLM mediante el cual poder hacer las llamadas
+            - LLM object used to make the calls.
         `json_parse`: bool
-            - Booleano para saber si es necesario realizar un parse de los resultados de del LLM
-            - Se realiza con LLMs que NO sean de OpenAI
+            - Whether the LLM results need to be parsed.
+            - Used with LLMs that are not from OpenAI.
 
     Returns
     -------
         `respuesta_llm`: dict
-            - Respuesta del LLM directamente en formato dict/json
+            - Mapping containing the processed values.
     """
     messages = [SystemMessage(content=prompt),
                 HumanMessage(content=f"""
@@ -154,30 +192,30 @@ async def juzgar_CIE10(CIE10_codigo: str, CIE10_descripción: str, diagnostico_e
     """
     💸💸💸
 
-    Juzga si el código CIE10 seleccionado es correcto respecto al diagnostico original
+    Judges whether the selected CIE10 code is correct for the original diagnosis.
 
     Parameters
     ----------
         `CIE10_codigo`: str
-            - Código CIE10 seleccionado a juzgar
+            - Selected CIE10 code to judge.
         `CIE10_descripción`: str
-            - Descripción del código CIE10 seleccionado a juzgar
-        `diagnostico_extraido`: str
-            - Diagnostico original del cual juzgar si el CIE10 es correcto o no
+            - Description of the selected CIE10 code to judge.
+        `diagnosis_extraido`: str
+            - Original diagnosis used to judge whether the CIE10 code is correct.
         `contexto`: str
-            - Informe completo desde el cual se ha extraido el diagnostico
+            - Complete report from which the diagnosis was extracted.
         `prompt`: str
-            - Prompt de instrucciones usado por el LLM para saber como dirigir su tarea
+            - Instruction prompt guiding the LLM task.
         `llm`
-            - Objeto LLM mediante el cual poder hacer las llamadas
+            - LLM object used to make the calls.
         `json_parse`: bool
-            - Booleano para saber si es necesario realizar un parse de los resultados de del LLM
-            - Se realiza con LLMs que NO sean de OpenAI
+            - Whether the LLM results need to be parsed.
+            - Used with LLMs that are not from OpenAI.
 
     Returns
     -------
         `respuesta_llm`: dict
-            - Respuesta del LLM directamente en formato dict/json
+            - Mapping containing the processed values.
     """
     # messages = [SystemMessage(content=prompt),
     #             HumanMessage(content=f"""
@@ -223,26 +261,26 @@ async def decidir_CIE10(diagnostico_extraido: str, contexto: str, prompt: str, l
     """
     💸💸💸
 
-    Decide el código CIE10 de un diagnostico extriado
+    Selects the CIE10 code for an extracted diagnosis.
 
     Parameters
     ----------
-        `diagnostico_extraido`: str
-            - Diagnostico original del cual juzgar si el CIE10 es correcto o no
+        `diagnosis_extraido`: str
+            - Original diagnosis used to judge whether the CIE10 code is correct.
         `contexto`: str
-            - Informe completo desde el cual se ha extraido el diagnostico
+            - Complete report from which the diagnosis was extracted.
         `prompt`: str
-            - Prompt de instrucciones usado por el LLM para saber como dirigir su tarea
+            - Instruction prompt guiding the LLM task.
         `llm`
-            - Objeto LLM mediante el cual poder hacer las llamadas
+            - LLM object used to make the calls.
         `json_parse`: bool
-            - Booleano para saber si es necesario realizar un parse de los resultados de del LLM
-            - Se realiza con LLMs que NO sean de OpenAI
+            - Whether the LLM results need to be parsed.
+            - Used with LLMs that are not from OpenAI.
 
     Returns
     -------
         `respuesta_llm`: dict
-            - Respuesta del LLM directamente en formato dict/json
+            - Mapping containing the processed values.
     """
     messages = [SystemMessage(content=prompt),
                 HumanMessage(content=f"""
@@ -256,7 +294,7 @@ async def decidir_CIE10(diagnostico_extraido: str, contexto: str, prompt: str, l
 
     answer = await llm.ainvoke(messages, json_schema=docs_dir / "esquema_selected_and_decider.json")
     answer = answer.content
-    
+
     if json_parse:
         m = re.findall(r'```(?:json)?\s*(.*?)\s*```', answer, re.DOTALL | re.IGNORECASE)
         json_texto = (m[-1] if m else answer).strip()
@@ -273,31 +311,31 @@ async def decidir_CIE10(diagnostico_extraido: str, contexto: str, prompt: str, l
 
 async def completar_df_predicted_nearest_text_only(df_predicted: pd.DataFrame, df_reference: pd.DataFrame, df_nearest_embeddings: torch.Tensor, df_predicted_embeddings: torch.Tensor, semaforo: asyncio.Semaphore, add_semantic_similarity: bool = False) -> pd.DataFrame:
     """
-    Función que se encarga de averiguar cual es la enfermedad más cercana a la obtenida mediante el LLM anteriormente. Realiza una similaridad semántica de embeddings entre lo predicho y todas las descripciones reales de referencia. Aquella más similar es la que se añade al DataFrame respuesta.
+    Finds the disease closest to the one previously returned by the LLM. It computes embedding similarity between the prediction and all reference descriptions, then adds the closest match to the result dataframe.
 
-    El código CIE10 añadido como referencia es el relacionado con la enfermedad más parecida semánticamente
+    The reference CIE10 code is the one associated with the most semantically similar disease.
 
-    NO toma en cuenta el código CIE10 relacionado con la enfermedad ni en el predicho ni en la referencia
+    The CIE10 code associated with the disease is not considered in either the prediction or the reference.
 
     Parameters
     ----------
         `df_predicted`: pd.DataFrame
-            - DataFrame con los **datos predichos** sobre los informes. Obtenidos anteriormente por algún **LLM**
+            - Dataframe with the **predicted data** for the reports, previously obtained from an **LLM**.
         `df_reference`: pd.DataFrame
-            - DataFrame con todos los códigos CIE10 originales y sus respectivas descripciones. Tienen que estár en castellano
+            - Dataframe with all original CIE10 codes and their descriptions. They must be in Spanish.
         `df_nearest_embeddings`: torch.Tensor
-            - Embeddings ya procesados anteriormente. Se trata de cada una de las descripciones de enfermedades obtenidas anteriormente por un LLM
+            - Previously computed embeddings for disease descriptions obtained from an LLM.
         `df_predicted_embeddings`: torch.Tensor
-            - Embeddings ya procesados anteriormente. Se trata de cada una de las descripciones de enfermedades reales en los códigos CIE10
+            - Previously computed embeddings for the real disease descriptions associated with CIE10 codes.
         `semaforo`: asyncio.Semaphore
-            - Semaforo para poder hacer toda la actividad de forma asincrona
+            - Semaphore used to run the activity asynchronously.
         `add_semantic_similarity`: bool
-            - Booleano para saber si se quiere añadir el valor de similitud semántica obtenido
+            - Whether to add the computed semantic-similarity value.
 
     Returns
     -------
         `df_final`: pd.DataFrame
-            - Una extensión del `df_predicted` donde se añaden nuevas columnas para indicar cual es la enfermedad y su código correspondiente más similar
+            - Dataframe containing the transformed records.
     """
     df_final = df_predicted.copy()
     max_vals, max_idx = torch.max(cos_sim(df_nearest_embeddings, df_predicted_embeddings), dim=0)
@@ -328,48 +366,48 @@ async def completar_df_predicted_nearest_text_only(df_predicted: pd.DataFrame, d
 
 async def asistente_seleccionador_cie10(df_final: pd.DataFrame, CIE10_full_list: list, df_reference: pd.DataFrame, prompt_CIE10_selector: str, llm, docs_dir: Path, semaforo: asyncio.Semaphore, find_CIE10_similars_level: int = 0, model: SentenceTransformer = None, add_semantic_similarity: bool = False, json_parse: bool = False, tratamiento_fallos: bool = False) -> pd.DataFrame:
     """
-    Función que permite que el asistene evaluador lleve a cabo su tarea. Se realizan una serie de pasos para cada enfermedad:
+    Allows the evaluator assistant to perform its task through a series of steps for each disease:
 
-        1) Se obtienen todos los códigos CIE10 similares respecto a un nivel del obtenido por el LLM inicialmente y del semanticamente similar entre enfermedades
+        1) Gets all CIE10 codes similar at the requested level to both the initial LLM result and the semantically similar disease.
 
-        2) Se le pasa al LLM juzgador todos estos códigos junto con sus descripciones reales. Se le pide que, dada como valor de entrada el diagnostico extraido por el LLM inicial, devuelva a cual se asemeja realmente entre todos los posibles 
+        2) Passes these codes and their real descriptions to the judging LLM, asking it to select the closest match to the diagnosis extracted by the initial LLM.
 
-        3) Se añade al DataFrame dos columnas nuevas las cuales indican el código CIE10 y diagnostico seleccionado
+        3) Adds two columns to the dataframe containing the selected CIE10 code and diagnosis.
 
-    Si el valor de la variable `tratamiento_fallos` es `True`, solamente se hará todo esto con los diagnosticos que su valor en `tree_5` sea `False`
+    If `tratamiento_fallos` is `True`, performs this process only for diagnoses whose `tree_5` value is `False`.
 
     Parameters
     ----------
         `df_final`: pd.DataFrame
-            - DataFrame con lo obtenido mediante el LLM anteriormente y una posterior similitud de coseno entre diagnosticos
+            - Dataframe containing the previous LLM output and subsequent cosine similarity between diagnoses.
         `CIE10_full_list`: list
-            - Lista con todos los códigos CIE10. Únicamente usa los códigos, sin su descripción
+            - List of all CIE10 codes. Only the codes are used, without descriptions.
         `df_reference`: pd.DataFrame
-            - DataFrame con todos los códigos CIE10 originales y sus respectivas descripciones. Tienen que estár en castellano
+            - Dataframe with all original CIE10 codes and their descriptions. They must be in Spanish.
         `prompt_CIE10_selector`: str
-            - Prompt para que el asistente evaluador pueda saber como realizar su trabajo
+            - Prompt instructing the evaluator assistant how to perform its task.
         `llm`
-            - Objeto LLM mediante el cual poder hacer las llamadas
+            - LLM object used to make the calls.
         `semaforo`: asyncio.Semaphore
-            - Semaforo para poder hacer toda la actividad de forma asincrona
+            - Semaphore used to run the activity asynchronously.
         `find_CIE10_similars_level`: int
-            - Número entero que indica sobre que nivel realizar la búsqueda de códigos CIE10 similares. Por defecto (`cie10_similar_level` = 0) dicta que lo anterior al punto es fijo. Valores postivos aumentan lo fijado por la derecha del punto y valores negativos reducen lo fijado por la izquierda del punto
+            - Integer specifying the hierarchy level for finding similar CIE10 codes. Por defecto (`cie10_similar_level` = 0) dicta que lo anterior al punto es fijo. Valores postivos aumentan lo fijado por la derecha del punto y values negativos reducen lo fijado por la izquierda del punto
             - Investigar la función `find_CIE10_similars` para más información
         `model`: SentenceTransformer
-            - Encoder que permite hacer embeddings de los diagnosticos si se considera necesario
+            - Encoder used to create diagnosis embeddings when needed.
         `add_semantic_similarity`: bool
-            - Booleano para saber si se quiere añadir el valor de similitud semántica obtenido
+            - Whether to add the computed semantic-similarity value.
         `json_parse`: bool
-            - Booleano para saber si es necesario realizar un parse de los resultados de del LLM
-            - Se realiza con LLMs que NO sean de OpenAI
+            - Whether the LLM results need to be parsed.
+            - Used with LLMs that are not from OpenAI.
         `tratamiento_fallos`: bool
-            - Booleano para saber si realizar el analisis con los que no se han llegado a decidir como correcto anteriormente
-            - Únicamente se realiza el proceso con aquellos que su variable `tree_5` sea `False`
+            - Whether to process cases that were not previously judged correct.
+            - Processes only records whose `tree_5` value is `False`.
 
     Returns
     -------
         `df_final`: pd.DataFrame
-            - DataFrame final con el código CIE10 y su enfermedad correspondiente asociada elegida tras la decisión del asistente evaluador
+            - Dataframe containing the transformed records.
     """
     if(tratamiento_fallos):
         desc = "Completando el DF (selected) - Tratamiento fallos"
@@ -415,7 +453,7 @@ async def asistente_seleccionador_cie10(df_final: pd.DataFrame, CIE10_full_list:
                                         print("↻ Reintentando...")
                                     else:
                                         print(f"❌ Falló definitivamente al seleccionar (LLM) la fila {i}\n")
-                            
+
                         else:
                             CIE10_final = {"CIE10": df_final.loc[i, "CIE10_nearest"]}
 
@@ -461,35 +499,35 @@ async def asistente_seleccionador_cie10(df_final: pd.DataFrame, CIE10_full_list:
 
 async def asistente_juzgador_cie10(df_final: pd.DataFrame, prompt_CIE10_juzgador: str, llm, contexts: dict[str, str], docs_dir: Path, semaforo = asyncio.Semaphore, json_parse: bool = False, tratamiento_fallos: bool = False) -> pd.DataFrame:
     """
-    Función que permite que el asistene juzgador lleve a cabo su tarea. Navega por todo el DataFrame añadiendo una nueva columna fina `tree_5`:
-    
-        1) Si la columna `tree_4` es `True`, no se evalúan los valores y continua siendo `True`
-        
-        2) Si la columna `tree_4` es `False` trata de juzgar si el código CIE10, y su correspondiente descripción, corresponden y tienen sentido respecto al diagnostico de la enfermedad. Si el juzgador lo considera oportuno, este nuevo valor será el de `True`
+    Allows the judging assistant to perform its task by traversing the dataframe and adding a new `tree_5` column:
+
+        1) If the `tree_4` column is `True`, values are not evaluated and remain `True`.
+
+        2) If `tree_4` is `False`, judges whether the CIE10 code and its description correspond to the disease diagnosis. If appropriate, the new value is set to `True`.
 
     Parameters
     ----------
         `df_final`: pd.DataFrame
-            - DataFrame con lo obtenido mediante el LLM anteriormente y una posterior similitud de coseno entre diagnosticos
+            - Dataframe containing the previous LLM output and subsequent cosine similarity between diagnoses.
         `prompt_CIE10_juzgador`: str
-            - Prompt para que el asistente juzgador pueda saber como realizar su trabajo
+            - Prompt para que el asistente juzgador pueda saber como perform su trabajo
         `llm`
-            - Objeto LLM mediante el cual poder hacer las llamadas
+            - LLM object used to make the calls.
         `contexts`: dict[str, str]:
-            - Diccionario de todos los documentos leidos anteriormente. Key es el nombre, value el contenido
+            - Dictionary of all previously read documents, where the key is the name and the value is the content.
         `semaforo`: asyncio.Semaphore
-            - Semaforo para poder hacer toda la actividad de forma asincrona
+            - Semaphore used to run the activity asynchronously.
         `json_parse`: bool
-            - Booleano para saber si es necesario realizar un parse de los resultados de del LLM
-            - Se realiza con LLMs que NO sean de OpenAI
+            - Whether the LLM results need to be parsed.
+            - Used with LLMs that are not from OpenAI.
         `tratamiento_fallos`: bool
-            - Booleano para saber si realizar el analisis con los que no se han llegado a decidir como correcto anteriormente
-            - Unicamente se realizara la llamada al LLM cuando el valor original de `tree_5` es False
+            - Whether to process cases that were not previously judged correct.
+            - Calls the LLM only when the original `tree_5` value is `False`.
 
     Returns
     -------
         `df_final`: pd.DataFrame
-            - DataFrame final con la última columna completada
+            - Dataframe containing the transformed records.
     """
     if(tratamiento_fallos):
         sufijo = "_V2"
@@ -497,7 +535,7 @@ async def asistente_juzgador_cie10(df_final: pd.DataFrame, prompt_CIE10_juzgador
     else:
         sufijo = ""
         desc = "Completando el DF (juzgador)"
-    
+
     df_final["diagnostico_predicted"] = df_final["diagnostico_predicted"].map(lambda x: fix_text(x) if isinstance(x, str) else x)
 
     resultados = []
@@ -546,28 +584,28 @@ async def asistente_juzgador_cie10(df_final: pd.DataFrame, prompt_CIE10_juzgador
 
 async def asistente_seleccionador_tratamiento_falsos_cie10(df_final: pd.DataFrame, prompt_CIE10_seleccionador: str, llm, contexts: dict[str, str], docs_dir: Path, semaforo: asyncio.Semaphore, json_parse: bool = False) -> pd.DataFrame:
     """
-    Función que permite volver a realizar el proceso de selección de códigos CIE10 a aquellos diagnosticos que no han podido ser declarados como correctos en procesos anteriores
+    Repeats CIE10 code selection for diagnoses that could not be marked as correct in earlier steps.
 
     Parameters
     ----------
         `df_final`: pd.DataFrame
-            - DataFrame con lo obtenido mediante el LLM anteriormente y una posterior similitud de coseno entre diagnosticos
+            - Dataframe containing the previous LLM output and subsequent cosine similarity between diagnoses.
         `prompt_CIE10_seleccionador`: str
-            - Prompt para que el asistente juzgador pueda saber como realizar su trabajo
+            - Prompt para que el asistente juzgador pueda saber como perform su trabajo
         `llm`
-            - Objeto LLM mediante el cual poder hacer las llamadas
+            - LLM object used to make the calls.
         `contexts`: dict[str, str]:
-            - Diccionario de todos los documentos leidos anteriormente. Key es el nombre, value el contenido
+            - Dictionary of all previously read documents, where the key is the name and the value is the content.
         `semaforo`: asyncio.Semaphore
-            - Semaforo para poder hacer toda la actividad de forma asincrona
+            - Semaphore used to run the activity asynchronously.
         `json_parse`: bool
-            - Booleano para saber si es necesario realizar un parse de los resultados de del LLM
-            - Se realiza con LLMs que NO sean de OpenAI
+            - Whether the LLM results need to be parsed.
+            - Used with LLMs that are not from OpenAI.
 
     Returns
     -------
         `df_final`: pd.DataFrame
-            - DataFrame final con la última columna completada
+            - Dataframe containing the transformed records.
     """
     resultados = []
 
@@ -609,5 +647,5 @@ async def asistente_seleccionador_tratamiento_falsos_cie10(df_final: pd.DataFram
         df_final.loc[idx, "CIE10_predicted_V2"] = resultado
 
     df_final = df_final.reset_index(drop=True)
-    
+
     return df_final

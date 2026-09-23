@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "SARVI"
-version = "0.1.0"
+version = "0.2.0"
 description = "Extractor de diagnósticos y códigos CIE10 desde informes médicos"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -22,8 +22,8 @@ dev = [
 ]
 
 # Tras `pip install -e .` se puede hacer:
-#   SARVI --tarea docx_tp_jsons --modo sync
-#   SARVI --tarea jsons_to_xlsx --modo async
+#   SARVI --tarea s1 --modo sync
+#   SARVI --tarea s2 --modo async
 [project.scripts]
 SARVI = "SARVI.main:main"
 

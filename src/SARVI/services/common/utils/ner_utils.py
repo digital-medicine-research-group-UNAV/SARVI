@@ -1,199 +1,72 @@
-import os
 import ast
+import torch
 import string
-import contextlib
 import numpy as np
 import pandas as pd
 
-from text_to_num import text2num
+from stop_words import get_stop_words
 
 from ....models.schemas import (
     Any
 )
 
 ###
-@contextlib.contextmanager
-def suppress_stderr():
-    old_stderr = os.dup(2)
-    devnull = os.open(os.devnull, os.O_WRONLY)
-    try:
-        os.dup2(devnull, 2)
-        yield
-    finally:
-        os.dup2(old_stderr, 2)
-        os.close(old_stderr)
-        os.close(devnull)
+stopwords_es = list(set(get_stop_words('spanish')+list(string.ascii_lowercase)+["ñ","ç","ch"]))
 ###
 
-def is_number(token: str):
+def average_overlapping_hidden_states(last_hidden_state: torch.Tensor, global_token_indices: torch.Tensor, attention_mask: torch.Tensor | None = None) -> torch.Tensor:
     """
-    Comprueba si un token representa un número, ya sea en formato numérico o escrito en texto en inglés o español.
+    Averages hidden states contributed by overlapping NER windows.
 
     Parameters
     ----------
-        `token`: str
-            - Token que se quiere evaluar como posible número
+        `last_hidden_state`: torch.Tensor
+            - Identifier values used to link or index records.
+        `global_token_indices`: torch.Tensor
+            - Token data used for encoding or alignment.
+        `attention_mask`: torch.Tensor | None
+            - Mask identifying non-padding input tokens.
 
     Returns
     -------
-        ``: bool
-            - `True` si el token puede interpretarse como número. En caso contrario, devuelve `False`
+        `torch.Tensor`
+            - Derived value produced by the operation.
     """
-    token = str(token).strip("▁").strip()
-    if not token:
-        return False
-    try:
-        float(token.replace(",", "."))
-        return True
-    except Exception:
-        pass
+    if last_hidden_state.dim() != 3:
+        raise ValueError(f"last_hidden_state debe tener forma (num_windows, seq_len, hidden_dim). Got {tuple(last_hidden_state.shape)}")
 
-    lowered = token.lower().replace("-", " ").strip()
-    if not lowered:
-        return False
+    if global_token_indices.shape != last_hidden_state.shape[:2]:
+        raise ValueError(f"global_token_indices debe alinear con last_hidden_state en las dos primeras dimensiones: indices={tuple(global_token_indices.shape)}, hidden={tuple(last_hidden_state.shape)}")
 
-    for lang in ("en", "es"):
-        try:
-            with suppress_stderr():
-                text2num(lowered, lang)
-            return True
-        except Exception:
-            pass
+    if attention_mask is not None and attention_mask.shape != global_token_indices.shape:
+        raise ValueError(f"attention_mask debe tener la misma forma que global_token_indices: attention_mask={tuple(attention_mask.shape)}, indices={tuple(global_token_indices.shape)}")
 
-    return False
+    valid_mask = global_token_indices.ge(0)
+    if attention_mask is not None:
+        valid_mask = valid_mask & attention_mask.bool()
 
-def merge_sentencepiece_words(tokens: list):
-    """
-    Reconstruye palabras completas a partir de tokens generados por un tokenizer tipo SentencePiece
+    if not valid_mask.any():
+        return last_hidden_state
 
-    Parameters
-    ----------
-        `tokens`: list
-            - Lista de tokens. Los tokens que empiezan por `▁` se interpretan como el inicio de una nueva palabra
+    flat_hidden = last_hidden_state.reshape(-1, last_hidden_state.size(-1))
+    flat_indices = global_token_indices.reshape(-1)
+    flat_valid = valid_mask.reshape(-1)
 
-    Returns
-    -------
-        `words`: list
-            - Lista de palabras reconstruidas a partir de los tokens originales
-    """
-    words = []
-    current = []
+    valid_indices = flat_indices[flat_valid]
+    valid_hidden = flat_hidden[flat_valid]
+    unique_indices, inverse = torch.unique(valid_indices, sorted=False, return_inverse=True)
 
-    for tok in tokens:
-        if tok.startswith("▁"):
-            if current:
-                words.append("".join(current))
-            current = [tok[1:]]  # remove ▁
-        else:
-            if current:
-                current.append(tok)
-            else:
-                current = [tok]
+    sums = valid_hidden.new_zeros((unique_indices.size(0), valid_hidden.size(-1)))
+    sums.index_add_(0, inverse, valid_hidden)
 
-    if current:
-        words.append("".join(current))
+    counts = valid_hidden.new_zeros((unique_indices.size(0), 1))
+    counts.index_add_(0, inverse, torch.ones((valid_hidden.size(0), 1), dtype=valid_hidden.dtype, device=valid_hidden.device))
 
-    return words
-    
-def is_punct(word: str):
-    """
-    Comprueba si una palabra está formada únicamente por signos de puntuación.
+    averaged = sums / counts
+    out = last_hidden_state.clone().reshape(-1, last_hidden_state.size(-1))
+    out[flat_valid] = averaged[inverse]
 
-    Parameters
-    ----------
-        `word`: str
-            - Palabra o token que se quiere comprobar
-
-    Returns
-    -------
-        ``: bool
-            - `True` si todos los caracteres de `word` son signos de puntuación y la cadena no está vacía. En caso contrario, devuelve `False`
-    """
-    return all(ch in string.punctuation for ch in word) and len(word) > 0
-
-def is_stopword_punct_or_number(word: str, stopwords_es: list):
-    """
-    Comprueba si una palabra es una stopword, un signo de puntuación o un número.
-
-    Parameters
-    ----------
-        `word`: str
-            - Palabra que se quiere evaluar
-
-        `stopwords_es`: list
-            - Lista de stopwords en español usadas como criterio de filtrado
-
-    Returns
-    -------
-        ``: bool
-            - `True` si la palabra es una stopword, puntuación o número. En caso contrario, devuelve `False`
-    """
-    word = word.strip().lower()
-    return (word in stopwords_es or is_number(word) or is_punct(word))
-
-
-def has_bad_surrounding(decoder:list, stopwords_es: list, limit_stopwords_surround: int):
-    """
-    Evalúa si los tokens de contenido de un span están rodeados por demasiadas stopwords, números o signos de puntuación.
-
-    Parameters
-    ----------
-        `decoder`: list
-            - Lista de tokens decodificados que forman el span
-
-        `stopwords_es`: list
-            - Lista de stopwords en español usadas para detectar palabras poco informativas
-
-        `limit_stopwords_surround`: int
-            - Número máximo de palabras de contexto que se revisan alrededor de cada palabra de contenido
-
-    Returns
-    -------
-        ``: bool
-            - `True` si el span presenta un contexto considerado problemático. Devuelve `False` si encuentra una palabra de contenido con contexto aceptable
-    """
-    words = merge_sentencepiece_words(decoder)
-    span = limit_stopwords_surround + 1
-
-    for i, word in enumerate(words):
-        if is_stopword_punct_or_number(word, stopwords_es):
-            continue
-        
-        # check right
-        if i - span >= 0:
-            left_words = words[i - span:i]
-            if all(is_stopword_punct_or_number(w, stopwords_es) for w in left_words):
-                return False
-
-        # check left
-        if i + span < len(words):
-            right_words = words[i + 1:i + 1 + span]
-            if all(is_stopword_punct_or_number(w, stopwords_es) for w in right_words):
-                return False
-
-    return True
-
-def get_edge_words(decoder: list):
-    """
-    Obtiene la primera y la última palabra de un span tras reconstruir las palabras completas desde tokens tipo SentencePiece.
-
-    Parameters
-    ----------
-        `decoder`: list
-            - Lista de tokens decodificados que forman el span
-
-    Returns
-    -------
-        ``: tuple
-            - Tupla con la primera y la última palabra en minúsculas. Si no hay palabras, devuelve **("", "")**
-    """
-    words = merge_sentencepiece_words(decoder)
-
-    if not words:
-        return "", ""
-
-    return words[0].lower(), words[-1].lower()
-
+    return out.reshape_as(last_hidden_state)
 
 def normalize_list(value: Any):
     """
@@ -244,20 +117,19 @@ def normalize_list(value: Any):
 
 def token_spans_are_adjacent(idx_a: list, idx_b: list):
     """
-    Comprueba si dos spans de tokens son directamente consecutivos
+    Processes token spans are adjacent for use by the pipeline.
 
     Parameters
     ----------
         `idx_a`: list
-            - Índices de tokens del primer span.
-
+            - Identifier values used to link the first span
         `idx_b`: list
-            - Índices de tokens del segundo span.
+            - Identifier values used to link the second span
 
     Returns
     -------
-        ``: bool
-            - **True** si los dos spans son adyacentes, es decir, si el último token de uno está justo antes del primer token del otro. En caso contrario, devuelve **False**
+        `Any`
+            - Derived value produced by the operation.
     """
     if not idx_a or not idx_b:
         return False
@@ -266,20 +138,19 @@ def token_spans_are_adjacent(idx_a: list, idx_b: list):
 
 def same_entity_component(row_a: dict, row_b: dict):
     """
-    Comprueba si dos spans deben formar parte de la misma entidad final.
+    Processes same entity component for use by the pipeline.
 
     Parameters
     ----------
         `row_a`: dict
-            - Diccionario con la información del primer span. Debe contener **token_set** y **token_idx**
-
+            - Dict with the info of the first span. Must contain **token_set** and **token_idx**
         `row_b`: dict
-            - Diccionario con la información del segundo span. Debe contener **token_set** y **token_idx**
+            - Dict with the info of the second span. Must contain **token_set** and **token_idx**
 
     Returns
     -------
-        ``: bool
-            - **True** si los spans se solapan o si son directamente adyacentes. En caso contrario, devuelve **False**
+        `Any`
+            - Derived value produced by the operation.
     """
     if row_a["token_set"] & row_b["token_set"]:
         return True
@@ -291,17 +162,17 @@ def same_entity_component(row_a: dict, row_b: dict):
 
 def build_entity_token_idx_from_component(component: list):
     """
-    Construye la lista final de índices de tokens de una entidad a partir de un componente de spans.
+    Builds the final list of token indices for an entity from a span component.
 
     Parameters
     ----------
         `component`: list
-            - Lista de spans que forman parte de la misma entidad. Cada elemento debe contener la clave **token_idx**
+            - List of spans that are part of the same entity. Each element must contain the **token_idx** key
 
     Returns
     -------
         `all_idx`: list
-            - Lista ordenada con todos los índices de tokens que forman la entidad final, sin duplicados
+            - Sorted list of all token indices that make up the final entity, with no duplicates
     """
     all_idx = set()
 
@@ -312,20 +183,20 @@ def build_entity_token_idx_from_component(component: list):
 
 def get_final_entity_components_from_group(group: pd.DataFrame, token_idx_col: str):
     """
-    Obtiene los componentes finales de entidades dentro de un grupo de spans con el mismo archivo, instancia de texto y etiqueta predicha.
+    Retrieves the final entity components within a group of spans that share the same file, text instance, and predicted label.
 
     Parameters
     ----------
         `group`: pd.DataFrame
-            - Grupo de filas del DataFrame correspondiente a una misma combinación de archivo, instancia de texto y etiqueta predicha
+            - Group of rows in the DataFrame corresponding to the same combination of file, text instance, and predicted label
 
         `token_idx_col`: str
-            - Nombre de la columna que contiene los índices de tokens de cada span
+            - Name of the column containing the token indices for each span
 
     Returns
     -------
         `components`: list
-            - Lista de componentes. Cada componente incluye: **source_row_indices** con los índices de las filas originales que forman el componente, y **final_token_idx** con los índices unidos de la entidad
+            - List of components. Each component includes: **source_row_indices** with the indices of the original rows that make up the component, and **final_token_idx** with the joined indices of the entity
     """
     rows = []
 
@@ -368,6 +239,25 @@ def get_final_entity_components_from_group(group: pd.DataFrame, token_idx_col: s
     return components
 
 def char_span_to_token_span(text: str, start: int, end: int, tokenizer_ner: Any):
+    """
+    Maps a character span to the corresponding token indices.
+
+    Parameters
+    ----------
+        `text`: str
+            - Text containing the entity or span.
+        `start`: int
+            - Start value or position.
+        `end`: int
+            - End value or position.
+        `tokenizer_ner`: Any
+            - Tokenizer used to encode the model input.
+
+    Returns
+    -------
+        `Any`
+            - Derived value produced by the operation.
+    """
     encoding = tokenizer_ner(text, return_offsets_mapping=True, add_special_tokens=False)
 
     token_idxs = []
@@ -379,9 +269,510 @@ def char_span_to_token_span(text: str, start: int, end: int, tokenizer_ner: Any)
     return token_idxs
 
 def lit(x):
+    """
+    Processes lit for use by the pipeline.
+
+    Parameters
+    ----------
+        `x`: Any
+            - Prediction value or collection to remap.
+
+    Returns
+    -------
+        `Any`
+            - Derived value produced by the operation.
+    """
     if isinstance(x, str):
         try:
             return ast.literal_eval(x)
         except Exception:
             return x
     return x
+
+def char_spans_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    """
+    Processes char spans overlap for use by the pipeline.
+
+    Parameters
+    ----------
+        `a_start`: int
+            - Argument controlling a start.
+        `a_end`: int
+            - Argument controlling a end.
+        `b_start`: int
+            - Argument controlling b start.
+        `b_end`: int
+            - Argument controlling b end.
+
+    Returns
+    -------
+        `bool`
+            - Boolean indicating whether the condition is satisfied.
+    """
+    return int(a_start) < int(b_end) and int(a_end) > int(b_start)
+
+def brat_entities_overlap(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """
+    Processes brat entities overlap for use by the pipeline.
+
+    Parameters
+    ----------
+        `a`: dict[str, Any]
+            - First code or value to compare.
+        `b`: dict[str, Any]
+            - Second code or value to compare.
+
+    Returns
+    -------
+        `bool`
+            - Boolean indicating whether the condition is satisfied.
+    """
+    return char_spans_overlap(a["start"], a["end"], b["start"], b["end"])
+
+def format_brat_t_line(entity_id: int, entity: dict[str, Any]) -> str:
+    """
+    Formats an entity as a BRAT text-bound annotation line.
+
+    Parameters
+    ----------
+        `entity_id`: int
+            - Entity record or collection of entity records.
+        `entity`: dict[str, Any]
+            - Entity record being processed.
+
+    Returns
+    -------
+        `str`
+            - Derived value produced by the operation.
+    """
+    return f"T{entity_id}\t{entity['label']} {int(entity['start'])} {int(entity['end'])}\t{entity.get('text', '')}"
+
+def token_overlaps_span(token_start: int, token_end: int, span_start: int, span_end: int) -> bool:
+    """
+    Processes token overlaps span for use by the pipeline.
+
+    Parameters
+    ----------
+        `token_start`: int
+            - Token data used for encoding or alignment.
+        `token_end`: int
+            - Token data used for encoding or alignment.
+        `span_start`: int
+            - Token or character positions used for alignment.
+        `span_end`: int
+            - Token or character positions used for alignment.
+
+    Returns
+    -------
+        `bool`
+            - Boolean indicating whether the condition is satisfied.
+    """
+    return token_start < span_end and token_end > span_start
+
+
+def parse_label_piece(piece: str, pos: int) -> dict | None:
+    """
+    Parses a token label into its prefix and entity type.
+
+    Examples
+    --------
+    "B-DISO"         -> B-DISO
+    "2_B-DISO"       -> B-DISO with entity id 2
+    "{2.1_B-DISO}"   -> B-DISO with discontinuous entity id 2, part 1
+    "{2.2_I-DISO}"   -> I-DISO with discontinuous entity id 2, part 2
+    "O"              -> None
+
+    Parameters
+    ----------
+        `piece`: str
+            - Argument controlling piece.
+        `pos`: int
+            - Argument controlling pos.
+
+    Returns
+    -------
+        `dict | None`
+            - Mapping containing the processed values.
+    """
+    piece = piece.strip()
+
+    if piece == "" or piece == "O":
+        return None
+
+    disc_id = None
+    entity_id = None
+    component_id = None
+    is_discontinuous = False
+
+    if piece.startswith("{") and piece.endswith("}"):
+        is_discontinuous = True
+        inner = piece[1:-1]
+
+        if "_" in inner:
+            id_part, piece = inner.split("_", 1)
+            if "." in id_part:
+                disc_id, component_id = id_part.split(".", 1)
+            else:
+                disc_id = id_part
+        else:
+            piece = inner
+    elif "_" in piece:
+        id_part, label_part = piece.split("_", 1)
+        if label_part.startswith("B-") or label_part.startswith("I-"):
+            entity_id = id_part
+            piece = label_part
+
+    if not (piece.startswith("B-") or piece.startswith("I-")):
+        return None
+
+    bio, entity = piece.split("-", 1)
+    if entity_id is None:
+        entity_id = disc_id
+
+    return {"bio": bio, "entity": entity, "entity_id": entity_id, "disc_id": disc_id, "component_id": component_id, "is_discontinuous": is_discontinuous, "pos": pos}
+
+
+def parse_multilabel(raw_label: str) -> list[dict]:
+    """
+    Parses labels separated by ';'.
+
+    Example
+    -------
+    "B-Date;B-DISO"
+    """
+    pieces = raw_label.split(";")
+
+    candidates = []
+
+    for pos, piece in enumerate(pieces):
+        parsed = parse_label_piece(piece, pos)
+
+        if parsed is not None:
+            candidates.append(parsed)
+
+    return candidates
+
+
+def label_entity(label: str) -> str | None:
+    if label == "O":
+        return None
+
+    return label.split("-", 1)[1]
+
+
+def candidate_identity(candidate: dict) -> str | None:
+    """
+    Processes candidate identity for use by the pipeline.
+
+    Parameters
+    ----------
+        `candidate`: dict
+            - Identifier values used to link or index records.
+
+    Returns
+    -------
+        `str | None`
+            - Derived value produced by the operation.
+    """
+    if candidate["is_discontinuous"]:
+        if candidate["disc_id"] is not None and candidate["component_id"] is not None:
+            return f"{candidate['disc_id']}.{candidate['component_id']}"
+
+        return candidate["disc_id"]
+
+    return candidate["entity_id"]
+
+
+def candidate_block_key(candidate: dict) -> tuple:
+    """
+    Processes candidate block key for use by the pipeline.
+
+    Parameters
+    ----------
+        `candidate`: dict
+            - Identifier values used to link or index records.
+
+    Returns
+    -------
+        `tuple`
+            - Tuple containing the derived values.
+    """
+    identity = candidate_identity(candidate)
+
+    if identity is None:
+        return ("entity", candidate["entity"])
+
+    return ("identity", candidate["entity"], identity)
+
+
+def can_continue_previous_entity(candidate: dict, previous_output_label: str, previous_identity: str | None) -> bool:
+    """
+    Processes can continue previous entity for use by the pipeline.
+    B-DISO followed by B-DISO can continue the same entity.
+
+    Parameters
+    ----------
+        `candidate`: dict
+            - Identifier values used to link or index records.
+        `previous_output_label`: str
+            - Entity or relation labels used by the model.
+        `previous_identity`: str | None
+            - Entity record or collection of entity records.
+
+    Returns
+    -------
+        `bool`
+            - Boolean indicating whether the condition is satisfied.
+    """
+    if previous_output_label == "O":
+        return False
+
+    previous_entity = label_entity(previous_output_label)
+
+    if candidate["entity"] != previous_entity:
+        return False
+
+    identity = candidate_identity(candidate)
+
+    if identity is not None or previous_identity is not None:
+        return identity == previous_identity
+
+    return True
+
+
+def candidate_to_output_label(candidate: dict, previous_output_label: str, previous_identity: str | None) -> str:
+    """
+    Converts selected candidate into the final normal BIO label.
+
+    Rules
+    -----
+    - {1.1_B-DISO} -> B-DISO
+    - {1.2_I-DISO} after {1.1_B-DISO} -> I-DISO
+    - {1.2_I-DISO} after O -> B-DISO
+    - B-DISO after B-DISO -> B-DISO
+    - I-DISO without previous DISO -> O
+    """
+    bio = candidate["bio"]
+    entity = candidate["entity"]
+
+    if candidate["is_discontinuous"]:
+        if bio == "I":
+            if can_continue_previous_entity(candidate=candidate, previous_output_label=previous_output_label, previous_identity=previous_identity):
+                return f"I-{entity}"
+            return f"B-{entity}"
+        return f"B-{entity}"
+
+    if bio == "B":
+        return f"B-{entity}"
+
+    if bio == "I":
+        if can_continue_previous_entity(candidate=candidate, previous_output_label=previous_output_label, previous_identity=previous_identity):
+            return f"I-{entity}"
+        return "O"
+    return "O"
+
+
+def normalize_bio_sequence(labels: list[str]) -> list[str]:
+    """
+    Normalizes multilabel/discontinuous BIO labels.
+
+    Main rules
+    ----------
+    1. Entities after ';' are not selected as new entities.
+    2. But if an entity after ';' continues the currently active valid entity, we keep that active entity.
+    3. Discontinuous entities are converted into normal entities.
+    4. Separated discontinuous parts become separate entities.
+    5. Consecutive B-ENT labels can belong to the same entity.
+    """
+    output_labels = []
+
+    previous_output_label = "O"
+    previous_identity = None
+
+    blocked_candidates = set()
+
+    for raw_label in labels:
+        candidates = parse_multilabel(raw_label)
+        present_block_keys = {candidate_block_key(candidate) for candidate in candidates}
+
+        # Remove blocked entity instances that are no longer present.
+        blocked_candidates = {block_key for block_key in blocked_candidates if block_key in present_block_keys}
+        selected_candidate = None
+
+        # 1. Prefer a candidate that continues the currently active valid entity, even if it appears after ';'
+        for candidate in candidates:
+            if can_continue_previous_entity(candidate=candidate, previous_output_label=previous_output_label, previous_identity=previous_identity):
+                selected_candidate = candidate
+                break
+
+        # 2. Otherwise, only use the first-position candidate. Do not start new entities from labels after ';'.
+        if selected_candidate is None:
+            first_candidates = [candidate for candidate in candidates if candidate["pos"] == 0]
+
+            if len(first_candidates) > 0:
+                first_candidate = first_candidates[0]
+
+                if candidate_block_key(first_candidate) not in blocked_candidates:
+                    selected_candidate = first_candidate
+
+        # 3. Produce final output label
+        if selected_candidate is None:
+            output_label = "O"
+            selected_block_key = None
+            selected_identity = None
+        else:
+            output_label = candidate_to_output_label(candidate=selected_candidate, previous_output_label=previous_output_label, previous_identity=previous_identity)
+
+            if output_label == "O":
+                selected_block_key = None
+                selected_identity = None
+            else:
+                selected_block_key = candidate_block_key(selected_candidate)
+                selected_identity = candidate_identity(selected_candidate)
+
+        output_labels.append(output_label)
+
+        # 4. Block entities that appear after ';' but were not selected. These are overlapping entity instances that started inside another entity.
+        for candidate in candidates:
+            if candidate["pos"] > 0:
+                block_key = candidate_block_key(candidate)
+                if selected_block_key != block_key:
+                    blocked_candidates.add(block_key)
+
+        previous_output_label = output_label
+        previous_identity = selected_identity
+
+    return output_labels
+
+
+def same_entity(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    return a["label"] == b["label"] and int(a["start"]) == int(b["start"]) and int(a["end"]) == int(b["end"])
+
+def entity_exists(entity: dict[str, Any], entities: list[dict[str, Any]]) -> bool:
+    """
+    Processes entity exists for use by the pipeline.
+
+    Parameters
+    ----------
+        `entity`: dict[str, Any]
+            - Entity record being processed.
+        `entities`: list[dict[str, Any]]
+            - Argument controlling entities.
+
+    Returns
+    -------
+        `bool`
+            - Boolean indicating whether the condition is satisfied.
+    """
+    return any(same_entity(entity, other) for other in entities)
+
+def entity_text_for_span(entity: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
+    """
+    Processes entity text for span for use by the pipeline.
+
+    Parameters
+    ----------
+        `entity`: dict[str, Any]
+            - Entity record being processed.
+        `candidates`: list[dict[str, Any]]
+            - Identifier values used to link or index records.
+
+    Returns
+    -------
+        `str`
+            - Derived value produced by the operation.
+    """
+    for candidate in candidates:
+        if int(candidate["start"]) == int(entity["start"]) and int(candidate["end"]) == int(entity["end"]) and candidate["text"]:
+            return candidate["text"]
+    return entity.get("text", "")
+
+def text_num_tokens_from_windows(windows: list[dict[str, Any]]) -> int:
+    """
+    Processes text num tokens from windows for use by the pipeline.
+
+    Parameters
+    ----------
+        `windows`: list[dict[str, Any]]
+            - Argument controlling windows.
+
+    Returns
+    -------
+        `int`
+            - Derived value produced by the operation.
+    """
+    max_abs_idx = -1
+
+    for window in windows:
+        for absolute_idx in window["absolute_token_indices"]:
+            if absolute_idx is not None:
+                max_abs_idx = max(max_abs_idx, int(absolute_idx))
+
+    return max_abs_idx + 1
+
+def shift_absolute_token_indices(absolute_token_indices: list[int | None], token_offset: int) -> list[int]:
+    """
+    Processes shift absolute token indices for use by the pipeline.
+
+    Parameters
+    ----------
+        `absolute_token_indices`: list[int | None]
+            - Token data used for encoding or alignment.
+        `token_offset`: int
+            - Token or character positions used for alignment.
+
+    Returns
+    -------
+        `list[int]`
+            - List of parsed, filtered, or generated values.
+    """
+    return [-1 if absolute_idx is None else token_offset + int(absolute_idx) for absolute_idx in absolute_token_indices]
+
+def entity_matches_correction(ent: dict, cor: dict, original_text: str) -> bool:
+    # return (ent["entity"]["start"] == cor["original_start"] and ent["entity"]["end"] == cor["original_end"] and ent["entity"]["text"] == cor["original_text"] and original_text[cor["original_start"]:cor["original_end"]] == cor["original_text"])
+    """
+    Checks whether a predicted entity matches its proposed correction.
+
+    Parameters
+    ----------
+        `ent`: dict
+            - Entity record or collection of entity records.
+        `cor`: dict
+            - Argument controlling cor.
+        `original_text`: str
+            - Source text being processed.
+
+    Returns
+    -------
+        `bool`
+            - Boolean indicating whether the condition is satisfied.
+    """
+    return (ent["entity"]["start"] == cor["original_start"] and ent["entity"]["end"] == cor["original_end"] and ent["entity"]["text"] == cor["original_text"])
+
+
+def get_missing_entities(original_entities: list[dict], corrected_entities: list[dict], original_text: str) -> list[dict]:
+    """
+    Finds entities present in the original annotations but missing after correction.
+
+    Parameters
+    ----------
+        `original_entities`: list[dict]
+            - Argument controlling original entities.
+        `corrected_entities`: list[dict]
+            - Argument controlling corrected entities.
+        `original_text`: str
+            - Source text being processed.
+
+    Returns
+    -------
+        `list[dict]`
+            - List of parsed, filtered, or generated values.
+    """
+    missing = []
+
+    for ent in original_entities:
+        exists = any(entity_matches_correction(ent, cor, original_text) for cor in corrected_entities)
+        if not exists:
+            missing.append(ent)
+
+    return missing
