@@ -20,8 +20,6 @@ __pycache__
 
 /notebooks/FT
 /notebooks/private
-/notebooks/ICDTraining/ICD_Analyze_Results.ipynb
-/notebooks/RETraining/Time_RE_Training_CT-EBM-SP_ONLY.ipynb
 
 /src/SARVI.egg-info
 
