@@ -4,6 +4,8 @@ Validation of ICD-10 Diagnoses</h2>
 
 # Instalation
 
+## 1. Code and requirements installation
+
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -20,6 +22,11 @@ pip install -e .
 > The command `pip install -e .` allows to just do `import SARVI` into any project
 
 - Rename the file `private/data.env.template` to `private/data.env` and add the corresponding values
+
+## 2. Model weights
+- The models checkpoints *(`.pt` files)* are stored in a separate HuggingFace repo. To install them just download the content and place it inside the dir `docs/` with the same organization
+
+> HF repository: https://huggingface.co/JulenRM/SARVI
 
 # How to execute
 
