@@ -169,8 +169,11 @@ def create_all_labels_desc(ctx: "PipelineContext", label2id: dict):
     #         codes_desc_REAL = list(set(all_labels_desc_REST[code]))
     #     codes_desc_REAL = list(set(codes_desc_REAL + [all_labels_desc_ORIGINAL[code][0]]))
     #     all_labels_desc[code] = embed_texts(codes_desc_REAL, show_tqdm=False)
-
-    df = read_parquet_file(ctx, "all_label_description.parquet")
+    df = None
+    try:
+        df = read_parquet_file(ctx, "all_label_description.parquet")
+    except Exception:
+        df = read_parquet_file(ctx, "all_label_description_dummy.parquet")
     all_labels_desc_df = dict(zip(df["All Code Full"].map(label2id), df["All Description"]))
 
     all_labels_desc = {}

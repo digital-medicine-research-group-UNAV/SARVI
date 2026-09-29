@@ -3,8 +3,8 @@ __pycache__
 *.pyo
 *.pyd
 *.env
-*.pt
 *.parquet
+!docs/all_label_description_dummy.parquet
 *.venv*
 .*
 
@@ -23,9 +23,6 @@ __pycache__
 
 /src/SARVI.egg-info
 
-/docs/CodiEsp
-/docs/MedLexSp_v2
-/docs/old
 
 /tmp/*
 /private/*
