@@ -78,6 +78,10 @@ python -m src.SARVI.main --tarea s1 --cie_10_version 2026 --ussage deterministic
 
 > Other models or exchanges between ASYNC and SYNC are NOT TESTED
 
+# Supporting Information
+
+Extra supporting information such as deeper dataset coding distribution and extensive results analysis can be found in `docs/Supporting Information`
+
 # **Warnings**
 
 - Although implemented, **--lora_model** is actually disabled and will return error
